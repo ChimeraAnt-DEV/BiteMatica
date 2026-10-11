@@ -21,8 +21,9 @@ assets/       demo schematic, generated icon
 
 ## Build
 
-Both scripts auto-discover the NDK and clone the pinned `preloader-android` tag into
-`third_party/` when it is absent. There is no machine-local path dependency.
+Both scripts auto-discover the NDK and clone `preloader-android` (its `main` branch, or
+`PRELOADER_REF`) into `third_party/` when it is absent. There is no machine-local path
+dependency. The SDK repo publishes no release tags, so a branch is the only thing to pin.
 
 ```bash
 ./build.sh --test         # host tests, then build + package

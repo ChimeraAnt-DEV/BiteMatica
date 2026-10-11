@@ -33,8 +33,18 @@ set(BITEMATICA_CORE_SOURCES
 add_library(bitematica_core STATIC ${BITEMATICA_CORE_SOURCES})
 target_include_directories(bitematica_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-find_package(ZLIB REQUIRED)
-target_link_libraries(bitematica_core PUBLIC ZLIB::ZLIB)
+# zlib: the NDK's sysroot ships it, so Android links `z` directly; a host build uses
+# the system package. Both only need the classic inflate/deflate entry points.
+if(ANDROID)
+  find_library(BITEMATICA_ZLIB z)
+  if(NOT BITEMATICA_ZLIB)
+    message(FATAL_ERROR "zlib (libz) was not found in the NDK sysroot")
+  endif()
+  target_link_libraries(bitematica_core PUBLIC "${BITEMATICA_ZLIB}")
+else()
+  find_package(ZLIB REQUIRED)
+  target_link_libraries(bitematica_core PUBLIC ZLIB::ZLIB)
+endif()
 
 # -----------------------------------------------
 # Android native mod (.AntEgg `type: native`)
@@ -62,17 +72,37 @@ if(ANDROID)
 
   find_library(ANDROID_LOG_LIB log)
 
+  # The preloader's public headers (pl/Logger.hpp in particular) use fmt, so the mod
+  # needs fmt headers even though it links none of the preloader's code: the SDK symbols
+  # are resolved by the loader at runtime. Fetch fmt the same way the preloader does.
+  if(NOT TARGET fmt::fmt)
+    include(FetchContent)
+    FetchContent_Declare(
+        fmt
+        GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+        GIT_TAG 11.2.0)
+    set(FMT_DOC OFF CACHE BOOL "Disable fmt docs" FORCE)
+    set(FMT_TEST OFF CACHE BOOL "Disable fmt tests" FORCE)
+    set(FMT_INSTALL OFF CACHE BOOL "Disable fmt install rules" FORCE)
+    FetchContent_MakeAvailable(fmt)
+  endif()
+
   add_library(bitematica SHARED src/mod/BiteMaticaMod.cpp)
   target_include_directories(bitematica PRIVATE "${PRELOADER_ANDROID_ROOT}/include")
-  target_link_libraries(bitematica PRIVATE bitematica_core ${ANDROID_LOG_LIB})
+  target_link_libraries(bitematica PRIVATE bitematica_core fmt::fmt ${ANDROID_LOG_LIB})
   target_compile_options(bitematica PRIVATE
       $<$<COMPILE_LANG_AND_ID:CXX,Clang,GNU>:
         -Wall -Wextra -Wpedantic -fvisibility=hidden -fvisibility-inlines-hidden>)
   set_target_properties(bitematica PROPERTIES OUTPUT_NAME "bitematica")
 
-  # The preloader exports the SDK symbols at load time; linking against it is only
-  # needed when it is built in the same tree. Otherwise the loader resolves them.
-  option(BITEMATICA_LINK_PRELOADER "Build and link the local preloader target" OFF)
+  # The SDK symbols (`pl::mod`, `pl::modmenu`, `pl::input`) come from the preloader.
+  # Build it as a subproject and link it: the mod's NEEDED entry then names
+  # libpreloader.so, which the loader has already mapped when it injects the mod, so
+  # the symbols bind to the running preloader. This is the same path the SDK's own
+  # full-cpp-mod example uses. `--unresolved-symbols=ignore-all` is only a fallback for
+  # the (unsupported) case of building the mod without a preloader checkout at all.
+  option(BITEMATICA_LINK_PRELOADER
+         "Build and link the local preloader-android target" ON)
   if(BITEMATICA_LINK_PRELOADER AND NOT TARGET preloader)
     add_subdirectory("${PRELOADER_ANDROID_ROOT}"
                      "${CMAKE_BINARY_DIR}/_preloader_android")
