@@ -50,6 +50,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -285,6 +286,13 @@ private:
   bitematica::gles::SchematicRenderer mRenderer;
   std::vector<bitematica::gles::SectionBuffer> mSectionBuffers;
   std::vector<bitematica::gles::SectionBuffer> mOutlineBuffers;
+  // The in-progress upload generation (K1). Uploaded a few sections per frame; swapped in as the
+  // live set only when complete, so a frame is never left with no geometry.
+  std::vector<bitematica::mesh::SectionMesh> mUploadSections;
+  std::vector<bitematica::mesh::SectionMesher::SectionOutline> mUploadOutlines;
+  std::vector<bitematica::gles::SectionBuffer> mStagingSections;
+  std::vector<bitematica::gles::SectionBuffer> mStagingOutlines;
+  size_t mUploadCursor{0};
 
   // Async meshing. The worker reads only a `MeshRequest` snapshot, never the live members.
   std::thread mMeshWorker;
@@ -471,6 +479,13 @@ void BiteMaticaMod::releaseGlResources() {
   mSectionBuffers.clear();
   for (auto &buffer : mOutlineBuffers) mRenderer.releaseSection(buffer);
   mOutlineBuffers.clear();
+  for (auto &buffer : mStagingSections) mRenderer.releaseSection(buffer);
+  mStagingSections.clear();
+  for (auto &buffer : mStagingOutlines) mRenderer.releaseSection(buffer);
+  mStagingOutlines.clear();
+  mUploadSections.clear();
+  mUploadOutlines.clear();
+  mUploadCursor = 0;
   mRenderer.shutdown();
 }
 
@@ -797,41 +812,68 @@ void BiteMaticaMod::drawWorldSpace(const bitematica::render::CameraFrame &camera
 }
 
 void BiteMaticaMod::uploadPendingMesh() {
+  // Pick up a newly finished mesh, if any, and start a fresh upload generation. Any partially
+  // uploaded previous generation is discarded (its buffers released) because the mesh it was
+  // building is already stale.
   std::vector<bitematica::mesh::SectionMesh> sections;
   std::vector<bitematica::mesh::SectionMesher::SectionOutline> outlines;
   {
     std::lock_guard<std::mutex> lock(mPendingMutex);
-    if (!mPending.ready) return;
-    sections.swap(mPending.sections);
-    outlines.swap(mPending.outlines);
-    mPending.ready = false;
-  }
-
-  // Release the old buffers and upload the new ones. This happens on the render thread because it
-  // touches the GL context.
-  for (auto &buffer : mSectionBuffers) mRenderer.releaseSection(buffer);
-  mSectionBuffers.clear();
-  mSectionBuffers.reserve(sections.size());
-  for (const auto &section : sections) {
-    bitematica::gles::SectionBuffer buffer;
-    if (mRenderer.uploadSection(buffer, section)) {
-      mSectionBuffers.push_back(buffer);
+    if (mPending.ready) {
+      sections.swap(mPending.sections);
+      outlines.swap(mPending.outlines);
+      mPending.ready = false;
+      // Discard a partial upload: release the staging buffers, keep the live ones drawn.
+      for (auto &buffer : mStagingSections) mRenderer.releaseSection(buffer);
+      mStagingSections.clear();
+      for (auto &buffer : mStagingOutlines) mRenderer.releaseSection(buffer);
+      mStagingOutlines.clear();
+      mUploadSections.assign(std::make_move_iterator(sections.begin()),
+                             std::make_move_iterator(sections.end()));
+      mUploadOutlines.assign(std::make_move_iterator(outlines.begin()),
+                             std::make_move_iterator(outlines.end()));
+      mUploadCursor = 0;
     }
   }
 
-  // Upload the outline (block-edge) buffers for this same mesh generation.
-  for (auto &buffer : mOutlineBuffers) mRenderer.releaseSection(buffer);
-  mOutlineBuffers.clear();
-  mOutlineBuffers.reserve(outlines.size());
-  for (const auto &outline : outlines) {
-    bitematica::gles::SectionBuffer buffer;
-    const bitematica::render::Vec3 min{outline.originX, outline.originY, outline.originZ};
-    const bitematica::render::Vec3 max{outline.originX + bitematica::mesh::SectionMesher::kSectionSize,
-                                       outline.originY + bitematica::mesh::SectionMesher::kSectionSize,
-                                       outline.originZ + bitematica::mesh::SectionMesher::kSectionSize};
-    if (mRenderer.uploadOutlines(buffer, outline.vertices, outline.segments, min, max)) {
-      mOutlineBuffers.push_back(buffer);
+  if (mUploadSections.empty() && mUploadOutlines.empty()) return;
+
+  // Upload at most `uploadSectionsPerFrame` (K1) so a large mesh cannot hitch the frame. The live
+  // buffers keep being drawn until the whole new generation is uploaded, then it is swapped in — so
+  // there is never a frame with no geometry.
+  int budget = mConfig.uploadSectionsPerFrame;
+  while (budget > 0 && mUploadCursor < mUploadSections.size() + mUploadOutlines.size()) {
+    const size_t index = mUploadCursor++;
+    if (index < mUploadSections.size()) {
+      bitematica::gles::SectionBuffer buffer;
+      if (mRenderer.uploadSection(buffer, mUploadSections[index])) {
+        mStagingSections.push_back(buffer);
+      }
+    } else {
+      const auto &outline = mUploadOutlines[index - mUploadSections.size()];
+      bitematica::gles::SectionBuffer buffer;
+      const bitematica::render::Vec3 min{outline.originX, outline.originY, outline.originZ};
+      const float n = bitematica::mesh::SectionMesher::kSectionSize;
+      const bitematica::render::Vec3 max{outline.originX + n, outline.originY + n,
+                                         outline.originZ + n};
+      if (mRenderer.uploadOutlines(buffer, outline.vertices, outline.segments, min, max)) {
+        mStagingOutlines.push_back(buffer);
+      }
     }
+    --budget;
+  }
+
+  // The generation is complete: swap the staging buffers in as the live set and release the old.
+  if (mUploadCursor >= mUploadSections.size() + mUploadOutlines.size()) {
+    for (auto &buffer : mSectionBuffers) mRenderer.releaseSection(buffer);
+    for (auto &buffer : mOutlineBuffers) mRenderer.releaseSection(buffer);
+    mSectionBuffers = std::move(mStagingSections);
+    mOutlineBuffers = std::move(mStagingOutlines);
+    mStagingSections.clear();
+    mStagingOutlines.clear();
+    mUploadSections.clear();
+    mUploadOutlines.clear();
+    mUploadCursor = 0;
   }
 }
 
@@ -1121,8 +1163,23 @@ void BiteMaticaMod::loadCurrentSchematic() {
     return;
   }
   const std::string path = mFiles[static_cast<size_t>(mFileIndex)];
+  // The memory cap (K6) is checked before the file is parsed, from its header size where possible;
+  // here the post-parse volume is the reliable measure, so the cap is enforced right after the read
+  // and a schematic above it is refused with a named error rather than risking an OOM crash.
   const bitematica::format::LoadResult result =
       bitematica::format::SchematicFormat::readPath(path);
+  if (result.success &&
+      result.schematic.volume() > mConfig.maxSchematicBlocks) {
+    mHasSchematic = false;
+    mSchematicPtr.reset();
+    char buffer[160];
+    std::snprintf(buffer, sizeof(buffer),
+                  "Schematic refused: %lld blocks exceeds the %lld-block memory cap",
+                  static_cast<long long>(result.schematic.volume()), mConfig.maxSchematicBlocks);
+    setStatus(buffer);
+    if (mSelf != nullptr) mSelf->getLogger().warn("BiteMatica: {}", buffer);
+    return;
+  }
   if (!result.success) {
     mHasSchematic = false;
     mSchematicPtr.reset();

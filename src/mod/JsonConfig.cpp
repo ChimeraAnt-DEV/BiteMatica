@@ -155,6 +155,8 @@ private:
     else if (key == "verifyMismatchMode") config.verifyMismatchMode = value;
     else if (key == "verifyBlocksPerFrame") config.verifyBlocksPerFrame = value;
     else if (key == "palettePreset") config.palettePreset = value;
+    else if (key == "maxSchematicBlocks") config.maxSchematicBlocks = value;
+    else if (key == "uploadSectionsPerFrame") config.uploadSectionsPerFrame = value;
   }
 
   const std::string &mText;
@@ -211,6 +213,8 @@ std::string JsonConfig::serialize(const Config &config) {
   out += "  \"maxRenderBlocks\": " + std::to_string(config.maxRenderBlocks) + ",\n";
   out += "  \"maxTriangles\": " + std::to_string(config.maxTriangles) + ",\n";
   out += "  \"renderDistance\": " + std::to_string(config.renderDistance) + ",\n";
+  out += "  \"maxSchematicBlocks\": " + std::to_string(config.maxSchematicBlocks) + ",\n";
+  out += "  \"uploadSectionsPerFrame\": " + std::to_string(config.uploadSectionsPerFrame) + ",\n";
   out += "  \"layerMode\": " + std::to_string(static_cast<int>(config.layerMode)) + ",\n";
   out += "  \"layerSingle\": " + std::to_string(config.layerSingle) + ",\n";
   out += "  \"layerMin\": " + std::to_string(config.layerMin) + ",\n";

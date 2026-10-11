@@ -48,6 +48,11 @@ struct Config {
   int maxTriangles = 1500000;
   /// Distance beyond which sections are not drawn (0 disables distance culling).
   int renderDistance = 256;
+  /// Maximum number of blocks a schematic may have before it is refused (K6). A schematic above
+  /// this is not loaded, with a named error, rather than risking an out-of-memory crash.
+  long long maxSchematicBlocks = 32000000;
+  /// Maximum GPU sections uploaded per frame (K1), so a large mesh does not hitch the frame.
+  int uploadSectionsPerFrame = 2;
 
   /// Layer filter (item 10): all layers, a single layer, or a range.
   LayerMode layerMode = LayerMode::All;
@@ -136,6 +141,9 @@ struct Config {
     if (maxRenderBlocks > 250000) maxRenderBlocks = 250000;
     if (maxTriangles < 1000) maxTriangles = 1000;
     if (maxTriangles > 4000000) maxTriangles = 4000000;
+    if (maxSchematicBlocks < 100000) maxSchematicBlocks = 100000;
+    if (uploadSectionsPerFrame < 1) uploadSectionsPerFrame = 1;
+    if (uploadSectionsPerFrame > 64) uploadSectionsPerFrame = 64;
     if (renderDistance < 0) renderDistance = 0;
     if (renderDistance > 1024) renderDistance = 1024;
     if (layerSingle < 0) layerSingle = 0;
