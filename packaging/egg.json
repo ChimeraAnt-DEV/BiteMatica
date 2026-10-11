@@ -1,6 +1,6 @@
 {
   "name": "BiteMatica",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "ChimeraAnt",
   "type": "native",
   "entry_point": "bin/libbitematica.so",
