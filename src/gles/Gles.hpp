@@ -41,11 +41,17 @@ inline constexpr GLenum GL_DEPTH_WRITEMASK = 0x0B24;
 inline constexpr GLenum GL_VIEWPORT = 0x0BA2;
 inline constexpr GLenum GL_BLEND_SRC_RGB = 0x80C9;
 inline constexpr GLenum GL_BLEND_DST_RGB = 0x80C8;
+inline constexpr GLenum GL_BLEND_SRC_ALPHA = 0x80CB;
+inline constexpr GLenum GL_BLEND_DST_ALPHA = 0x80CA;
+inline constexpr GLenum GL_BLEND_EQUATION_RGB = 0x8009;
+inline constexpr GLenum GL_BLEND_EQUATION_ALPHA = 0x883D;
 inline constexpr GLenum GL_DEPTH_FUNC = 0x0B74;
 inline constexpr GLenum GL_CULL_FACE_MODE = 0x0B45;
 inline constexpr GLenum GL_FRONT_FACE = 0x0B46;
 inline constexpr GLenum GL_ACTIVE_TEXTURE = 0x84E0;
-inline constexpr GLenum GL_TEXTURE0 = 0x84C0;
+inline constexpr GLenum GL_STENCIL_TEST = 0x0B90;
+inline constexpr GLenum GL_SCISSOR_TEST = 0x0C11;
+inline constexpr GLenum GL_COLOR_WRITEMASK = 0x0C23;
 
 /// The runtime-resolved GLES entry points BiteMatica needs.
 ///
@@ -63,6 +69,8 @@ struct Functions {
   void *CullFace = nullptr;
   void *FrontFace = nullptr;
   void *BlendFuncSeparate = nullptr;
+  void *BlendEquationSeparate = nullptr;
+  void *ColorMask = nullptr;
   void *Viewport = nullptr;
   void *GenBuffers = nullptr;
   void *BindBuffer = nullptr;

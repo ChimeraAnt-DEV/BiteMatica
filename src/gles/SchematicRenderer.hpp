@@ -56,18 +56,24 @@ public:
 
   /// Draws the uploaded sections for this frame.
   ///
-  /// @param viewProjection world->clip matrix
+  /// Culling happens entirely in the placement's local space, so both the frustum and the camera
+  /// position are passed already transformed into it (`viewProjection * localToWorld` for the
+  /// frustum, `worldToPlacementLocal` for the camera). That is what makes the cull correct for a
+  /// rotated placement: section boxes stay axis-aligned in local space, and a rotated placement's
+  /// sections are no longer wrongly culled at the screen edges.
+  ///
+  /// @param localViewProjection world->clip pre-multiplied by the placement's local->world matrix
   /// @param placementOrigin world position of the placement's minimum corner
   /// @param placementRotationDegrees the placement's yaw (0/90/180/270) applied about the origin
   /// @param mode translucent / outlines / mismatch
   /// @param alpha 0..1 overall alpha
-  /// @param cameraPosition used for distance culling
+  /// @param localCameraPosition the camera in placement-local space, for distance culling
   /// @param maxDistance distance cull radius in blocks (<= 0 disables it)
-  /// @param frustum frustum for culling (built from the same viewProjection)
-  void draw(const render::Mat4 &viewProjection, const render::Vec3 &placementOrigin,
+  /// @param localFrustum frustum extracted from `localViewProjection`
+  void draw(const render::Mat4 &localViewProjection, const render::Vec3 &placementOrigin,
             float placementRotationDegrees, DrawMode mode, float alpha,
-            const render::Vec3 &cameraPosition, float maxDistance,
-            const render::Frustum &frustum, const std::vector<SectionBuffer> &sections);
+            const render::Vec3 &localCameraPosition, float maxDistance,
+            const render::Frustum &localFrustum, const std::vector<SectionBuffer> &sections);
 
   /// The number of triangles drawn in the last `draw` call, for the perf HUD.
   int lastDrawnTriangles() const { return mLastTriangles; }
@@ -75,12 +81,19 @@ public:
   int lastDrawnSections() const { return mLastSections; }
 
 private:
+  /// Every piece of GL state this renderer touches, captured before a draw and restored after.
+  ///
+  /// The shader binds no textures, so the texture unit and binding are not touched at all — only
+  /// GL_ACTIVE_TEXTURE is saved and restored, because it is global state the game may rely on.
+  /// Stencil, scissor and colour mask are captured because the game may leave them enabled, which
+  /// would otherwise make the ghost blocks invisible or clipped; both blend alpha factors and the
+  /// blend equation are captured so a restore cannot leave the game blending differently.
   struct SavedState {
     GLint program{};
     GLint vao{};
     GLint arrayBuffer{};
     GLint elementBuffer{};
-    GLint texture2d{};
+    GLint activeTexture{};
     GLboolean blend{};
     GLboolean depthTest{};
     GLboolean cullFace{};
@@ -88,8 +101,15 @@ private:
     GLint depthFunc{};
     GLint cullMode{};
     GLint frontFace{};
-    GLint blendSrc{};
-    GLint blendDst{};
+    GLint blendSrcRgb{};
+    GLint blendDstRgb{};
+    GLint blendSrcAlpha{};
+    GLint blendDstAlpha{};
+    GLint blendEquationRgb{};
+    GLint blendEquationAlpha{};
+    GLboolean stencilTest{};
+    GLboolean scissorTest{};
+    GLint colorMask[4]{};
   };
 
   void saveState(SavedState &state) const;
@@ -99,7 +119,9 @@ private:
   GLuint mProgram{};
   GLint mUniformMvp{-1};
   GLint mUniformAlpha{-1};
-  GLint mUniformMode{-1};
+  GLint mUniformPlacementOrigin{-1};
+  GLint mUniformPlacementYawCos{-1};
+  GLint mUniformPlacementYawSin{-1};
   int mLastTriangles{0};
   int mLastSections{0};
 };
