@@ -252,14 +252,26 @@ Everything that can be wrong without a GPU is pure C++ with **no Android depende
 ```bash
 python3 test/make_fixtures.py test/fixtures
 cmake -S . -B build/host -DCMAKE_BUILD_TYPE=Release
-cmake --build build/host --target bitematica_tests bitematica_world_tests
-./build/host/bitematica_tests        # formats, mesh projector, toolbar, controller, config
-./build/host/bitematica_world_tests  # placement transforms, mesher, verification, translation
+cmake --build build/host --target bitematica_tests bitematica_world_tests \
+    bitematica_litematica_tests bitematica_render_tests
+./build/host/bitematica_tests          # formats, chrome, config, migration
+./build/host/bitematica_world_tests    # placement, mesher, verification, translation, writers
+./build/host/bitematica_litematica_tests  # tool modes, raycast, paste, placements, menus
+./build/host/bitematica_render_tests   # render math: camera-relative, culling, shapes, colours
 ```
 
-**242 checks across the three suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
+**~470 checks across the four suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
 
-The world suite covers the parts most likely to be subtly wrong and hardest to debug on a device: the placement transform (every rotation × mirror round-trips `toWorld`/`toLocal`), the mesher (a solid 3×3×3 collapses to a handful of merged quads, and interior faces are culled), placement-local frustum culling (the local→world transform is pinned against the shader's own rotation signs), verification (missing/wrong/extra counted against a fake world), the Java→Bedrock direction inversion, and the `.litematic` write→read round trip.
+The suites cover the parts most likely to be subtly wrong and hardest to debug on a device: the placement transform (every rotation × mirror round-trips `toWorld`/`toLocal`), the mesher (a solid 3×3×3 collapses to a handful of merged quads, and interior faces are culled), placement-local frustum culling, verification (correct/missing/wrong/extra/unknown counted against a fake world), the Java→Bedrock direction inversion, the `.litematic` write→read round trip, camera-relative precision at ±3e7, the transform-applied-once rule, the mirror baked into the mesh, and the fail-closed world-source gate and probe.
+
+A benchmark target prints mesher/verifier timings:
+
+```bash
+cmake --build build/host --target bitematica_bench
+./build/host/bitematica_bench
+```
+
+CI additionally runs `test/link_check.sh` (the `.so` has no strong `pl::render::` reference, so it loads on an old preloader), `test/hud_geometry_guard.sh` (no schematic geometry can go through HUD commands) and `tools/check_config_sync.py` (the packaged config and schema agree).
 
 ---
 
@@ -334,6 +346,42 @@ A schematic is normalized into one shape — a palette plus one palette index pe
 - **The per-frame render callback is a public SDK API.** Mods had no way to run code on the render thread with the GL context, so it was added to the preloader (`pl/Render.hpp`) rather than worked around. The mod does not invent a hook it cannot guarantee.
 - **Fail-closed everywhere.** A missing file, a malformed manifest, a truncated archive, an unreadable config, an unresolved camera, an unverified block getter: each becomes a named, user-visible reason in the status line, never a crash and never a guessed value.
 - **The demo that ships is real.** The bundled hut is written by the same encoders the tests use, and it is loaded back through the production reader before packaging.
+
+---
+
+## Troubleshooting
+
+The status line always names the mode or the failure. Find the message here.
+
+| Status line says | What it means | Fix |
+| --- | --- | --- |
+| `World-space GL (sdk, ...)` | Working: the preloader render callback is live. | Nothing. |
+| `World-space GL (egl, ...)` | Working: the EGL fallback seam is live. | Nothing. |
+| `World-space renderer unavailable: no render seam - update GlowberryClient` | The preloader has no render API and EGL is not hooked. | Pin the preloader at or after `167226d` and rebuild the client — `docs/BUMP_PRELOADER.md`. |
+| `world-space renderer unavailable: <GL_VERSION>` | The backend is not GLES 3.0+. | The mod draws nothing on a non-GL backend; report the GL version string. |
+| `Verification unavailable: BlockSource::getBlock slot is not set...` | The block getter is unconfigured. | Confirm the slot for your build — `docs/FINDING_GETBLOCK.md` — then set `verifyBlockSourceSlot` and `verifyGameVersionTag`. |
+| `world source not verified for this game version` | The version gate is closed. | Set `verifyGameVersionTag` to the running version. |
+| `world source probe failed: ...` | The confirmed reader returned implausible values. | The slot is likely wrong; re-check it against the disassembly. The source is off for the session. |
+| `Schematic refused: N blocks exceeds the M-block memory cap` | The schematic is above `maxSchematicBlocks`. | Raise the cap, or load a smaller build. |
+| `Load failed: ...` | The file could not be read. | The reason names the format problem (e.g. "schem is missing a Palette compound"). |
+| `World-space renderer unavailable` in the menu | Same as the status-line failure. | See above. |
+
+## Limitations
+
+- **Verified game versions.** World-space rendering needs a preloader at or after commit `167226d`
+  (`pl/Render.hpp`). The camera comes from the local-player feed, whose offsets are shared by
+  1.26.33 / 1.26.50 / 1.26.51. A build outside that set may work but is not verified.
+- **World verification needs a confirmed block getter.** The slot and calling convention are
+  build-specific and are never guessed; verification ships off until you confirm them
+  (`docs/FINDING_GETBLOCK.md`).
+- **Survival does not auto-place.** The mod highlights the next block to place and generates
+  commands; it never places blocks on its own.
+- **Paste is via commands or a structure file.** `/structure load` (cheats) or `/setblock`/`/fill`
+  files the player runs. Nothing touches the network.
+- **Textures are flat colours.** Tier 1 uses a data-driven colour table (`data/block_colors.json`),
+  not the game's texture atlas.
+- **Entities** (armor stands, item frames) are preserved in file round-trips but not verified or
+  rendered beyond a placeholder.
 
 ---
 
