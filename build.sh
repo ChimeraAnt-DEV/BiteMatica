@@ -79,9 +79,10 @@ if [ "$RUN_TESTS" = "1" ]; then
   echo "==> Host tests"
   HOST_BUILD="$ROOT/build/host"
   cmake -S "$ROOT" -B "$HOST_BUILD" -DCMAKE_BUILD_TYPE=Release >/dev/null
-  cmake --build "$HOST_BUILD" --target bitematica_tests
+  cmake --build "$HOST_BUILD" --target bitematica_tests bitematica_world_tests
   python3 "$ROOT/test/make_fixtures.py" "$ROOT/test/fixtures"
   "$HOST_BUILD/bitematica_tests"
+  "$HOST_BUILD/bitematica_world_tests"
 fi
 
 echo "==> Configuring Android build"

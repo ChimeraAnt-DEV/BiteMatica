@@ -29,9 +29,9 @@
 
 BiteMatica brings the *Litematica* experience to **Minecraft: Bedrock Edition on Android**, packaged as a native **`.AntEgg`** mod for [GlowberryClient](https://github.com/ChimeraAnt-DEV/GlowberryClient).
 
-Load a schematic, see it drawn over your world, read off exactly how many of which blocks it needs, and export a Bedrock-native structure file when you are done. It is a **client-side viewer and helper** — it never touches a server, never places blocks on its own, and makes no attempt to hide what it is.
+Load a schematic, see it drawn **in the world** where you want it built, read off exactly how many of which blocks it needs, **verify it against the world as you build**, and export a Bedrock-native structure file when you are done. It is a **client-side viewer and helper** — it never touches a server, never places blocks on its own, and makes no attempt to hide what it is.
 
-If you know Litematica on Java Edition, the mental model is the same: a schematic is a box of blocks, the overlay shows you where each block belongs, and the material list tells you what to gather.
+If you know Litematica on Java Edition, the mental model is the same: a schematic is a box of blocks, the overlay shows you where each block belongs, and the material list tells you what to gather. BiteMatica adds the part that matters most — telling you what is already placed and what is still missing.
 
 ### Why "BiteMatica"?
 
@@ -51,13 +51,41 @@ It is a *bite-sized Litematica for Bedrock* — rebuilt from the ground up for a
 
 Detection is by **content first**, not the file extension: BiteMatica decompresses the file, reads its NBT, and inspects the root compound to decide what it is holding. A `.litematic` renamed to `.schem` still opens. A file that is not a schematic fails with a specific reason ("schem is missing a Palette compound"), never with a vague "unsupported file".
 
-### The overlay
-- An **isometric block overlay** projected from the schematic's own geometry, so a wall reads as a wall and a roof reads as a roof.
-- **Face culling**: only the faces that point toward the camera are meshed, and fully enclosed blocks are skipped — a 3×3×3 cube draws 26 blocks, not 27, because the centre one can never be seen.
-- **Three render modes**: translucent **Overlay** (the default), a bounding-box **Skeleton** for placement checks, and **Hidden**.
+### World-space rendering
+- The schematic is drawn as **real 3D geometry in the world**, not a screen-space projection — so it moves with the world as you walk, and it sits at a real position you can build toward.
+- **Depth-tested**: ghost blocks are hidden behind real terrain. A wall you have already built occludes the ghost of the wall behind it, which is the whole point of an overlay you can build against.
+- **A GLES3 renderer inside the mod** with strict save/restore of every piece of GL state it touches (program, VAO, buffers, blend, depth, cull, texture bindings). Corrupting the game's renderer is the worst possible bug, so the restore is exhaustive and runs even when a draw is skipped.
+- **A proper mesher**: the schematic is split into **16³ sections**, each block contributes only its **exposed faces** (a face whose neighbour is solid is never emitted), and coplanar faces of the same colour are **greedily merged** — a flat wall becomes a handful of quads instead of hundreds. Meshes are uploaded **once** as VBOs and drawn with **frustum and distance culling**.
+- **Meshing runs off the render thread** on a worker; the render callback only uploads finished buffers and draws, so the render thread never meshes.
+
+### Render modes
+- **Translucent ghost blocks** (the default), **outlines only**, and **mismatch highlighting** (see verification below).
 - **Adjustable opacity** (10–100%) so the build never fights the world behind it.
-- **Painter's sort** — far faces are drawn before near ones, so overlapping geometry composites correctly instead of z-fighting.
-- A **render-block cap** (default 60,000, up to 250,000) so a mega-build cannot stall your frame rate; when the cap bites, the status line says so instead of silently dropping blocks.
+- A **triangle budget** (default 1.5M, up to 4M) and a **distance cull** (default 256 blocks) so a mega-build cannot stall your frame rate; when the budget bites, the status line says so instead of silently dropping geometry.
+
+### Layer modes
+Show **all layers**, a **single layer**, or a **range** — the standard way to build a floor-by-floor structure without the upper floors hiding the one you are working on.
+
+### Verify against the world
+The feature that makes a schematic tool actually useful: **compare the schematic to the live world** and colour every block by its state.
+- **Correct** (green), **Missing** (red, needs placing), **Wrong** (amber, wrong block), **Extra** (blue, should be removed).
+- The comparison is strict about block type but tolerant about states, because Bedrock's state names for the same block differ from Java's.
+- It is **fail-closed**: the mod resolves the game's block getter by RTTI vtable name (the same approach the SDK's own hooks use), and if the target or its ABI is unverified on your build, verification reports "the world is not readable" rather than inventing block states and colouring everything wrong.
+
+### World-anchored placements
+The schematic has a **world origin**, not a screen position. You can **move it to the player**, **rotate it in 90° steps**, **mirror it**, and **offset it vertically** — the toolbar has a button for each.
+
+### Live material list
+When verification has run, the material panel shows **required / placed / missing** for every block family and updates as you build. It exports as **CSV** for planning off-device.
+
+### Java → Bedrock block translation
+Java Edition schematics do not load correctly on Bedrock without translation: `oak_stairs[facing=north,half=bottom]` is not a Bedrock block state. BiteMatica carries a **translation table** for the families where the state actually differs — stairs, doors, trapdoors, fences, walls, logs, leaves, redstone, waterlogging — including the counter-intuitive ones (Java's `facing` maps to Bedrock's `weirdo_direction` with *inverted* meaning; Java's `half=top` becomes `upside_down_bit=1`). Blocks whose id is identical on both editions pass through unchanged.
+
+### Selection tool and `.litematic` writer
+Capture a region out of the live world and **save it as a `.litematic`** — the same format Java Edition's Litematica reads — so a build made on Bedrock can be shared with Java players.
+
+### Cheat-route placement
+Exporting a **`.mcstructure`** and running `/structure load` is the reliable way to place a build, and it is exactly what the game itself supports. The toolbar's export button prints the ready-to-run command for your current placement, rotation included. Nothing about this mod touches the network or places blocks on its own.
 
 ### Material list
 The material panel counts how many of each block the schematic needs, sorted by quantity and grouped by **base block id**. You care that you need 340 stone, not that 120 of them are `axis=y`. It shows the top 16 and a "+N more" line.
@@ -81,11 +109,18 @@ Press **S** (the *Export* button) and the loaded schematic is written to the mod
 | `+` `-` | Zoom in / out | Scales the projection |
 | `^` `v` | Nudge up / down | Lifts or drops the build |
 | `G` | Ghost placement | Outlines where the build would land |
-| `S` | Export | Writes a `.mcstructure` |
+| `S` | Export | Writes a `.mcstructure` and prints the `/structure load` command |
 | `R` | Reload | Re-scans the schematics folder |
+| `V` | Verify | Compares the schematic to the live world and colours it |
+| `Y` | Layers | All → single → range |
+| `P` | Move to player | Re-anchors the placement at your position |
+| `R` | Rotate placement | Turns the placement 90° |
+| `X` | Mirror | Mirrors the placement |
+| `C` | Export CSV | Writes the live material list as CSV |
+| `W` | Save `.litematic` | Captures the region from the world and saves it |
 
 ### Mod Menu integration
-BiteMatica registers a native Mod Menu module with a master toggle and live config: **Render Mode**, **Opacity**, **Material List**, and **Ghost Placement**. Turning the module off clears the overlay instead of leaving stale geometry on screen.
+BiteMatica registers a native Mod Menu module with a master toggle and live config: **Render Mode**, **Opacity**, **Layers**, **Material List**, **Ghost Placement**, and **Verify World**. Turning the module off clears the overlay instead of leaving stale geometry on screen.
 
 ---
 
@@ -147,16 +182,20 @@ dist/BiteMatica-1.0.0.antegg
 
 `build.sh` discovers the NDK from `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` / `ANDROID_HOME`, or takes `--ndk <path>`. If the preloader SDK is not already under `third_party/preloader-android`, it clones the SDK's `main` branch automatically, so the build has no hidden machine-local dependency. Set `PRELOADER_REF` to pin a branch or commit.
 
-### The host test suite
-The format readers, palette unpacking, the mesh projector, the toolbar geometry, the controller grid, the config round-trip and the structure export are all pure C++ with **no Android dependency**, so they are built and run on the host:
+### The host test suites
+Everything that can be wrong without a GPU is pure C++ with **no Android dependency**, so it is built and run on the host:
 
 ```bash
+python3 test/make_fixtures.py test/fixtures
 cmake -S . -B build/host -DCMAKE_BUILD_TYPE=Release
-cmake --build build/host --target bitematica_tests
-./build/host/bitematica_tests
+cmake --build build/host --target bitematica_tests bitematica_world_tests
+./build/host/bitematica_tests        # formats, mesh projector, toolbar, controller, config
+./build/host/bitematica_world_tests  # placement transforms, mesher, verification, translation
 ```
 
-The suite reads **real, generated schematic files** (gzip NBT, packed long arrays and all) through the production readers — not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
+**149 checks across the two suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
+
+The world suite covers the parts most likely to be subtly wrong and hardest to debug on a device: the placement transform (every rotation × mirror round-trips `toWorld`/`toLocal`), the mesher (a solid 3×3×3 collapses to a handful of merged quads, and interior faces are culled), frustum culling, verification (missing/wrong/extra counted against a fake world), the Java→Bedrock direction inversion, and the `.litematic` write→read round trip.
 
 ---
 
@@ -174,7 +213,12 @@ Settings live in `config/config.json` inside the installed mod. The launcher's c
   "showToolbar": true,
   "ghostPlacement": false,
   "onlyExposed": true,
-  "maxRenderBlocks": 60000
+  "maxRenderBlocks": 60000,
+  "maxTriangles": 1500000,
+  "renderDistance": 256,
+  "layerMode": 0,
+  "verifyAgainstWorld": false,
+  "verifyExtras": false
 }
 ```
 
@@ -184,6 +228,11 @@ Settings live in `config/config.json` inside the installed mod. The launcher's c
 | `opacity` | overlay alpha in percent (10–100) |
 | `onlyExposed` | skip fully enclosed blocks when meshing |
 | `maxRenderBlocks` | per-frame meshing cap (500–250000) |
+| `maxTriangles` | mesher triangle budget (1000–4000000) |
+| `renderDistance` | distance cull in blocks (0 disables) |
+| `layerMode` | `0` all · `1` single · `2` range |
+| `verifyAgainstWorld` | colour blocks by world match |
+| `verifyExtras` | also flag world blocks where air is wanted |
 | `toolbarX`/`toolbarY` | toolbar anchor in HUD pixels |
 | `materialX`/`materialY` | material-panel anchor in HUD pixels |
 
@@ -195,22 +244,30 @@ A hand-edited value that is out of range is **clamped** on load, so a typo canno
 
 ```
 bitematica_core   (host-testable, no Android)
-  nbt/       NbtReader, NbtWriter        gzip / zlib / raw NBT
-  format/    Litematica, Sponge, MCEdit, Bedrock structure readers, StructureWriter
-  core/      Schematic, BlockPalette, MaterialList
-  render/    ViewCamera, MeshBuilder, HudOverlay
-  mod/       Config, JsonConfig, SchematicLibrary, ControllerNavigator
-        |
-        |  UiCommand -> pl::modmenu::DrawCommand
-        v
-  mod/BiteMaticaMod.cpp   preloader glue: Mod Menu, input, overlay submit
+  nbt/        NbtReader, NbtWriter        gzip / zlib / raw NBT
+  format/     Litematica, Sponge, MCEdit, Bedrock structure readers + writers
+  core/       Schematic, BlockPalette, MaterialList, LiveMaterials
+  mesh/       SectionMesher   16^3 sections, exposed-face culling, greedy merge
+  world/      Placement, Verifier, WorldSource, Selection, CheatPlacement
+  translate/  BlockTranslation   Java -> Bedrock block states
+  render/     MathTypes (matrices, frustum), HudOverlay (2D toolbar)
+  mod/        Config, JsonConfig, SchematicLibrary, ControllerNavigator
+        |                                       |
+        |  world-space draw                     |  UiCommand -> HUD commands
+        v                                       v
+  gles/       Gles, SchematicRenderer      mod/BiteMaticaMod.cpp (preloader glue)
+        |                                       |
+        |  GLES3 draw with saved/restored state |
+        v                                       v
+  pl/Render.hpp render callback          pl/modmenu draw commands
 ```
 
-A schematic is normalized into one shape — a palette plus one palette index per block — so the renderer and the material list never know or care which dialect it came from. The overlay is submitted as flat filled-triangle draw commands, which is the only 3D-ish primitive the launcher HUD exposes; the isometric projection happens here in the mod, in pure arithmetic that the host tests exercise directly.
+A schematic is normalized into one shape — a palette plus one palette index per block — so the mesher, the verifier and the material list never know or care which dialect it came from.
 
 ### Honest engineering notes
-- **No per-frame callback is invented.** The public SDK has none, so the overlay's command list is re-submitted whenever it can change (load, toggle, input) and stays static in between — correct for a view a player only moves on purpose.
-- **Fail-closed everywhere.** A missing file, a malformed manifest, a truncated archive, an unreadable config: each becomes a named, user-visible reason in the status line, never a crash and never a guessed render.
+- **Two drawing paths, deliberately.** World-space geometry is GL (depth-tested, occluded by terrain); the toolbar and material panel are HUD commands (always on top). A toolbar that terrain could occlude would not be a toolbar.
+- **The per-frame render callback is a new public SDK API.** Mods had no way to run code on the render thread with the GL context, so it was added to the preloader (`pl/Render.hpp`) rather than worked around. The mod does not invent a hook it cannot guarantee.
+- **Fail-closed everywhere.** A missing file, a malformed manifest, a truncated archive, an unreadable config, an unresolved camera, an unverified block getter: each becomes a named, user-visible reason in the status line, never a crash and never a guessed value.
 - **The demo that ships is real.** The bundled hut is written by the same encoders the tests use, and it is loaded back through the production reader before packaging.
 
 ---
