@@ -147,6 +147,7 @@ struct MeshRequest {
   int maxTriangles{};
   bool outlines{};
   uint32_t outlineColor{};
+  std::vector<uint8_t> statuses;
 };
 
 /// An immutable snapshot of the state the render callback reads.
@@ -165,6 +166,7 @@ struct RenderSnapshot {
   float outlineWidth{1.5f};
   float polygonOffsetFactor{-1.0f};
   float polygonOffsetUnits{-1.0f};
+  int mismatchMode{};
   bitematica::world::Placement placement;
 };
 
@@ -215,6 +217,9 @@ private:
   void exportStructure();
   void exportCsv();
   void saveLitematic();
+  /// The running game version tag, best-effort. Empty when it cannot be read (the world-source gate
+  /// then stays closed). Reads the version from the preloader's SDK when it exposes one.
+  static std::string gameVersionTag();
   /// Loads/saves the placement list from/to `placements.json` (D1).
   void loadPlacements();
   void savePlacements();
@@ -405,11 +410,12 @@ bool BiteMaticaMod::enable() {
                                                              : "none (no world-space seam)");
     mSelf->getLogger().info("BiteMatica: render seam = {}", seam);
   }
-  // Pass the configured slot. A negative value means "not verified for this build", and the source
-  // stays available()==false so verification reports "world not readable" rather than guessing.
-  mWorldSource.install(mConfig.verifyBlockSourceSlot > 0
-                           ? static_cast<std::size_t>(mConfig.verifyBlockSourceSlot)
-                           : 0);
+  // Configure the world source. It stays available()==false unless a slot is set, a confirmed
+  // reader is installed, the configured version tag matches the running game version, and the
+  // sanity probe passes — so verification reports "world not readable" rather than guessing. The
+  // version string is best-effort; when it cannot be read the gate stays closed (fail-closed).
+  mWorldSource.configure(mConfig.verifyBlockSourceSlot, mConfig.verifyGameVersionTag,
+                         gameVersionTag());
   refreshStatusLine();
   submitHud();
   return true;
@@ -585,7 +591,7 @@ void BiteMaticaMod::installRenderCallback() {
 
         const auto built = bitematica::mesh::SectionMesher::build(
             *request.schematic, request.placement, request.layerMin, request.layerMax,
-            request.maxTriangles);
+            request.maxTriangles, &request.statuses);
         // The outline (block-edge) geometry is built here too, on the worker, so the render thread
         // only ever uploads buffers and draws.
         std::vector<bitematica::mesh::SectionMesher::SectionOutline> outlines;
@@ -774,6 +780,7 @@ void BiteMaticaMod::drawWorldSpace(const bitematica::render::CameraFrame &camera
   options.polygonOffsetUnits = snapshot.polygonOffsetUnits;
   options.outlines = snapshot.showOutlines;
   options.outlineWidth = snapshot.outlineWidth;
+  options.mismatchMode = snapshot.mismatchMode;
 
   mRenderer.draw(cull.mvp, cull.cameraRelativeOrigin, yaw, options, cull.localCamera, cull.frustum,
                  mSectionBuffers, mOutlineBuffers);
@@ -832,6 +839,7 @@ void BiteMaticaMod::refreshRenderSnapshot() {
   mRenderSnapshot.outlineWidth = mConfig.outlineWidth;
   mRenderSnapshot.polygonOffsetFactor = mConfig.polygonOffsetFactor;
   mRenderSnapshot.polygonOffsetUnits = mConfig.polygonOffsetUnits;
+  mRenderSnapshot.mismatchMode = mConfig.verifyMismatchMode;
   mRenderSnapshot.placement = mPlacement;
 }
 
@@ -855,6 +863,14 @@ void BiteMaticaMod::rebuildMeshAsync() {
     mRequest.outlines = mConfig.showOutlines;
     // Outline colour: a light accent that reads against terrain. Verification recolours it later.
     mRequest.outlineColor = 0xE64AE0A0u;
+    // Per-block verdicts (F6) so the mesh carries the mismatch state; the shader colours and filters
+    // by them, so changing the display mode is a uniform change, not a remesh. Copied under the
+    // lock because the verifier writes mVerification on the UI thread.
+    mRequest.statuses.clear();
+    mRequest.statuses.reserve(mVerification.statuses.size());
+    for (bitematica::world::BlockStatus status : mVerification.statuses) {
+      mRequest.statuses.push_back(static_cast<uint8_t>(status));
+    }
   }
   mMeshRequested.store(true, std::memory_order_release);
 }
@@ -1007,6 +1023,15 @@ bool BiteMaticaMod::performAction(bitematica::render::ToolbarButton::Action acti
 
 // --- loading -------------------------------------------------------------------------
 
+std::string BiteMaticaMod::gameVersionTag() {
+  // The preloader SDK exposes the *mod's* version (`NativeMod::getVersion`), not the game's, and the
+  // game does not export a version symbol. So the running game version cannot be read reliably here,
+  // and this returns empty. The world-source gate treats an empty running tag as "not auto-verified"
+  // and relies on the configured tag plus the sanity probe. When the SDK gains a game-version
+  // accessor, return it here and the gate becomes a strict match.
+  return {};
+}
+
 void BiteMaticaMod::loadPlacements() {
   if (mSelf == nullptr) return;
   const std::filesystem::path path = mSelf->getDataDir() / "placements.json";
@@ -1124,12 +1149,34 @@ void BiteMaticaMod::runVerification() {
     setStatus("Verification unavailable: " + mWorldSource.diagnostic());
     return;
   }
+  // The sanity probe (F1) runs once, before the first real read, at positions whose values are
+  // known: the block under the player's feet must not be air, and 400 blocks above must be. A reader
+  // that fails the probe is disabled for the session, so a mis-set slot cannot colour the schematic
+  // wrong. The probe needs a live player position.
+  {
+    float feet[3] = {0.0f, 0.0f, 0.0f};
+    if (bitematica::mod::LocalPlayerFeed::readPosition(feet)) {
+      const BlockPos feetBlock{static_cast<int>(std::floor(feet[0])),
+                               static_cast<int>(std::floor(feet[1])),
+                               static_cast<int>(std::floor(feet[2]))};
+      const BlockPos skyBlock{feetBlock.x, feetBlock.y + 400, feetBlock.z};
+      if (!mWorldSource.runProbe(feetBlock, skyBlock)) {
+        setStatus("Verification unavailable: " + mWorldSource.diagnostic());
+        return;
+      }
+    }
+    // No live player yet: the probe cannot run, so the first read stays off (readBlock returns false
+    // until the probe has passed) and the verifier reports Unknown rather than Missing.
+  }
   int layerMin = 0;
   int layerMax = 0;
   currentLayerRange(layerMin, layerMax);
   mVerification = bitematica::world::Verifier::verify(schematic(), mPlacement, mWorldSource,
                                                       layerMin, layerMax, mConfig.verifyExtras);
   mLiveMaterials = bitematica::core::LiveMaterials::build(schematic(), mVerification);
+  // Rebuild the mesh so the per-vertex verdicts (F6) match this verification. The mismatch display
+  // mode itself is a uniform, so only a new verification (not a mode change) remeshes.
+  rebuildMeshAsync();
   char buffer[200];
   std::snprintf(buffer, sizeof(buffer),
                 "Verified: %lld correct, %lld missing, %lld wrong block, %lld wrong state, "

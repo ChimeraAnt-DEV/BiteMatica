@@ -18,6 +18,7 @@
 #include "core/Schematic.hpp"
 #include "format/SchematicFormat.hpp"
 #include "gles/Gles.hpp"
+#include "gles/SchematicRenderer.hpp"
 #include "mesh/SectionMesher.hpp"
 #include "render/BlockColors.hpp"
 #include "render/MathTypes.hpp"
@@ -360,6 +361,64 @@ void testBlockShapeTable() {
   check(!BlockShape::neverRenders(barrier, true), "barrier renders when the toggle is on");
 }
 
+// --- per-vertex verdicts (F6) -------------------------------------------------------
+
+void testMeshCarriesVerdicts() {
+  std::printf("testMeshCarriesVerdicts\n");
+  bitematica::core::Schematic s;
+  makeSolidCube(s, 2); // 2x2x2 stone
+  bitematica::world::Placement placement;
+
+  // Without statuses, every vertex is Correct (0).
+  const auto plain = bitematica::mesh::SectionMesher::build(s, placement, 0, 1);
+  bool allCorrect = true;
+  for (const auto &section : plain.sections) {
+    for (const auto &v : section.vertices) {
+      if (v.verdict != 0) allCorrect = false;
+    }
+  }
+  check(allCorrect, "with no verification every vertex is tagged Correct");
+
+  // With statuses, the vertices carry them. Mark block (0,0,0) Missing (1).
+  std::vector<uint8_t> statuses(s.blocks.size(), 0);
+  statuses[static_cast<size_t>(s.indexOf(0, 0, 0))] = 1;
+  const auto tagged = bitematica::mesh::SectionMesher::build(s, placement, 0, 1, 1500000, &statuses);
+  bool sawMissing = false;
+  for (const auto &section : tagged.sections) {
+    for (const auto &v : section.vertices) {
+      if (v.verdict == 1) sawMissing = true;
+    }
+  }
+  check(sawMissing, "the Missing verdict reached the mesh vertices");
+}
+
+// --- mismatch display modes (F6) ----------------------------------------------------
+
+void testMismatchDisplayModes() {
+  std::printf("testMismatchDisplayModes\n");
+  using bitematica::gles::drawsUnderMismatchMode;
+  const int correct = 0, missing = 1, wrongBlock = 2, wrongState = 3, extra = 4, unknown = 5;
+
+  // Show all: everything is drawn.
+  check(drawsUnderMismatchMode(0, correct) && drawsUnderMismatchMode(0, missing) &&
+            drawsUnderMismatchMode(0, unknown),
+        "show-all draws every verdict");
+
+  // Only mismatch: the correct and unknown blocks are hidden, every wrong one is drawn.
+  check(!drawsUnderMismatchMode(1, correct), "only-mismatch hides correct");
+  check(!drawsUnderMismatchMode(1, unknown), "only-mismatch hides unknown");
+  check(drawsUnderMismatchMode(1, missing) && drawsUnderMismatchMode(1, wrongBlock) &&
+            drawsUnderMismatchMode(1, wrongState) && drawsUnderMismatchMode(1, extra),
+        "only-mismatch draws every wrong verdict");
+
+  // Hide correct: correct is hidden, but unknown stays visible (an unreadable area must not look
+  // finished).
+  check(!drawsUnderMismatchMode(2, correct), "hide-correct hides correct");
+  check(drawsUnderMismatchMode(2, unknown), "hide-correct keeps unknown visible");
+  check(drawsUnderMismatchMode(2, missing) && drawsUnderMismatchMode(2, extra),
+        "hide-correct keeps mismatches visible");
+}
+
 // --- block colours (C1) -------------------------------------------------------------
 
 void testBlockColorTableAndFallback() {
@@ -477,6 +536,8 @@ int main() {
   testGlesVersionGate();
   testOutlineIsSurfaceOnly();
   testOutlineEmptyForAirOnly();
+  testMeshCarriesVerdicts();
+  testMismatchDisplayModes();
   testBlockShapeTable();
   testBlockColorTableAndFallback();
   testMismatchPalettePresets();

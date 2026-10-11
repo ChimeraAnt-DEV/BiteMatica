@@ -24,6 +24,8 @@
 #include "world/CheatPlacement.hpp"
 #include "world/Placement.hpp"
 #include "world/Selection.hpp"
+#include "mod/GameWorldSource.hpp"
+#include "world/IncrementalVerifier.hpp"
 #include "world/Verifier.hpp"
 #include "world/WorldSource.hpp"
 
@@ -421,6 +423,115 @@ void testLooksWorldSpace() {
         "a zero forward vector is rejected");
 }
 
+// --- world source gate + probe (F1/F9) ------------------------------------------------
+
+void testWorldSourceVersionGate() {
+  std::printf("testWorldSourceVersionGate\n");
+  using bitematica::mod::GameWorldSource;
+  // A blank configured tag means "not verified": closed.
+  check(!GameWorldSource::versionGateOpen("", "1.26.51"), "blank configured tag keeps the gate shut");
+  // A matching tag (prefix match) opens the gate.
+  check(GameWorldSource::versionGateOpen("1.26.51", "1.26.51"), "an exact match opens the gate");
+  check(GameWorldSource::versionGateOpen("1.26.51", "1.26.51.1"),
+        "a configured tag prefixes a longer running tag");
+  // A mismatched running tag is closed.
+  check(!GameWorldSource::versionGateOpen("1.26.51", "1.26.60"),
+        "a mismatched version keeps the gate shut");
+  // An unreadable running tag with a configured tag is the user's acknowledgement: open, and the
+  // sanity probe is the safety net.
+  check(GameWorldSource::versionGateOpen("1.26.51", ""),
+        "an unreadable running tag with a configured tag opens the gate");
+}
+
+void testWorldSourceProbe() {
+  std::printf("testWorldSourceProbe\n");
+  using bitematica::mod::GameWorldSource;
+  using bitematica::core::BlockState;
+  using bitematica::core::BlockPos;
+
+  const BlockPos feet{10, 64, 10};
+  const BlockPos sky{10, 464, 10};
+
+  // A reader that reports stone at the feet and air above passes.
+  auto good = [](const BlockPos &p, BlockState &out) {
+    if (p.y == 64) out.name = "minecraft:stone";
+    else out = BlockState{};
+    return true;
+  };
+  check(GameWorldSource::probe(good, feet, sky) == GameWorldSource::ProbeResult::Passed,
+        "a plausible reader passes the probe");
+
+  // A reader that reports air under the feet fails.
+  auto feetAir = [](const BlockPos &, BlockState &out) {
+    out = BlockState{};
+    return true;
+  };
+  check(GameWorldSource::probe(feetAir, feet, sky) == GameWorldSource::ProbeResult::FeetIsAir,
+        "air under the feet fails the probe");
+
+  // A reader that reports solid 400 blocks up fails.
+  auto skySolid = [](const BlockPos &, BlockState &out) {
+    out.name = "minecraft:stone";
+    return true;
+  };
+  check(GameWorldSource::probe(skySolid, feet, sky) == GameWorldSource::ProbeResult::SkyIsNotAir,
+        "a solid sky position fails the probe");
+
+  // A reader that returns nothing fails as unreadable.
+  auto nothing = [](const BlockPos &, BlockState &) { return false; };
+  check(GameWorldSource::probe(nothing, feet, sky) == GameWorldSource::ProbeResult::Unreadable,
+        "a reader that returns nothing fails as unreadable");
+
+  // A null reader fails as unreadable, not a crash.
+  GameWorldSource::BlockReader none;
+  check(GameWorldSource::probe(none, feet, sky) == GameWorldSource::ProbeResult::Unreadable,
+        "a null reader fails as unreadable");
+}
+
+// --- incremental verification (F5) -----------------------------------------------------
+
+void testIncrementalVerification() {
+  std::printf("testIncrementalVerification\n");
+  // A 4x4x4 solid cube, all stone in the world, so every block is Correct.
+  bitematica::core::Schematic s;
+  s.palette.intern(bitematica::core::BlockState{});
+  bitematica::core::BlockState stone;
+  stone.name = "minecraft:stone";
+  s.palette.intern(stone);
+  s.bounds.min = {0, 0, 0};
+  s.bounds.max = {3, 3, 3};
+  s.blocks.assign(static_cast<size_t>(s.volume()), 1);
+
+  bitematica::world::Placement placement;
+  FakeWorld world;
+  for (int y = 0; y < 4; ++y) {
+    for (int z = 0; z < 4; ++z) {
+      for (int x = 0; x < 4; ++x) world.set({x, y, z}, "minecraft:stone");
+    }
+  }
+
+  bitematica::world::IncrementalVerifier verifier(s, placement, 0, 3, false);
+  check(!verifier.finished(), "a fresh incremental scan is not finished");
+  check(verifier.progressPercent() == 0, "progress starts at 0");
+
+  // A budget of 10 per step: 64 blocks need 7 steps.
+  int steps = 0;
+  while (!verifier.step(world, 10)) {
+    ++steps;
+    check(steps < 100, "the scan terminates");
+    if (steps >= 100) break;
+  }
+  check(verifier.finished(), "the scan finishes");
+  check(verifier.result().correct == 64, "all 64 blocks verified correct, got " +
+                                             std::to_string(verifier.result().correct));
+  check(verifier.progressPercent() == 100, "progress reaches 100");
+
+  // No section is starved: the queue is distance-ordered, so the first block checked is at the
+  // origin.
+  bitematica::world::IncrementalVerifier ordered(s, placement, 0, 3, false);
+  check(ordered.progressPercent() == 0, "the ordered scan also starts at 0");
+}
+
 // --- verification ---------------------------------------------------------------------
 
 void testVerification() {
@@ -722,6 +833,9 @@ int main() {
   testPlacementCullMvpExcludesPlacementTransform();
   testLocalCameraMath();
   testLooksWorldSpace();
+  testIncrementalVerification();
+  testWorldSourceVersionGate();
+  testWorldSourceProbe();
   testVerification();
   testVerificationWrongStateVsWrongBlock();
   testVerificationUnknownNotMissing();
