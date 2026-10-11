@@ -16,6 +16,7 @@
   "layerMax": 255,
   "verifyAgainstWorld": false,
   "verifyExtras": false,
+  "verifyBlockSourceSlot": -1,
   "toolbarX": 24,
   "toolbarY": 120,
   "materialX": 24,

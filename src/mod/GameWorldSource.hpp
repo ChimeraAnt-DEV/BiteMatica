@@ -22,18 +22,19 @@ namespace bitematica::mod {
 /// returned block id must be in the game's own id range.
 class GameWorldSource : public world::WorldSource {
 public:
-  /// Installs the hook. Idempotent. Returns true when the world becomes readable.
-  bool install();
+  /// Installs the hook using the given `BlockSource::getBlock` vtable slot.
+  ///
+  /// A slot of 0 or a negative value means "not verified for this build": the hook is not installed
+  /// and the source stays unavailable, because an RTTI name resolves to a real-but-unrelated
+  /// function on an unverified slot and calling it faults the game thread. Idempotent; the first
+  /// call wins.
+  bool install(std::size_t getBlockSlot);
 
   bool available() const override;
   bool readBlock(const core::BlockPos &position, core::BlockState &out) override;
 
   /// A short diagnostic for the load panel: which resolution path succeeded, or why not.
   const std::string &diagnostic() const { return mDiagnostic; }
-
-  /// The verified version range the hook is allowed to install on.
-  static const char *verifiedMinVersion();
-  static const char *verifiedMaxVersion();
 
 private:
   bool mInstalled{false};

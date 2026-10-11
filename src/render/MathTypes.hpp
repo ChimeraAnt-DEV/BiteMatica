@@ -76,6 +76,17 @@ struct Mat4 {
             m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14]};
   }
 
+  /// Transforms a point and returns the full homogeneous result, including `w`.
+  ///
+  /// `w` is what tells a projective transform apart: a world point in front of the camera lands at
+  /// w > 0, a point behind it at w < 0. That is the test {@link looksWorldSpace} uses.
+  void transformPoint4(const Vec3 &p, float out[4]) const {
+    out[0] = m[0] * p.x + m[4] * p.y + m[8] * p.z + m[12];
+    out[1] = m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13];
+    out[2] = m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14];
+    out[3] = m[3] * p.x + m[7] * p.y + m[11] * p.z + m[15];
+  }
+
   bool isFinite() const {
     for (float v : m) {
       if (!std::isfinite(v)) return false;
@@ -112,6 +123,34 @@ inline Mat4 lookAt(const Vec3 &eye, const Vec3 &forward, const Vec3 &up) {
   out.m[14] = dot(f, eye);
   out.m[15] = 1.0f;
   return out;
+}
+
+/// True when `viewProjection` behaves like a **world**-space transform rather than a camera-relative
+/// one.
+///
+/// The SDK's camera matrices are resolved by a best-effort probe, so their coordinate space is not
+/// guaranteed by a type. The test uses a property only a world->clip matrix has: a point one unit in
+/// front of the camera — `cameraPosition + forward` — must land in front of the near plane (`w > 0`)
+/// and near the centre of the screen. For a matrix that expects camera-relative coordinates, the
+/// camera's world position is not the origin of that space, so `cameraPosition + forward` is a large
+/// offset that projects far off-centre (or behind), and the check fails. The caller then falls back
+/// to the first-person approximation.
+///
+/// The camera's own position is deliberately not tested: it sits at view-space z = 0, so a
+/// perspective projection gives it w = 0 and no usable NDC.
+inline bool looksWorldSpace(const Mat4 &viewProjection, const Vec3 &cameraPosition,
+                            const Vec3 &cameraForward) {
+  if (!viewProjection.isFinite()) return false;
+  const float len = length(cameraForward);
+  if (len < 1e-4f) return false;
+
+  const Vec3 forward = cameraForward * (1.0f / len);
+  float clip[4];
+  viewProjection.transformPoint4(cameraPosition + forward, clip);
+  if (!std::isfinite(clip[3]) || clip[3] <= 1e-3f) return false;
+  const float ndcX = clip[0] / clip[3];
+  const float ndcY = clip[1] / clip[3];
+  return std::fabs(ndcX) <= 0.25f && std::fabs(ndcY) <= 0.25f;
 }
 
 /// The placement's local -> world transform: rotate about the Y axis, then translate.
