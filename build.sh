@@ -104,6 +104,8 @@ fi
 echo "==> Packaging .AntEgg"
 python3 "$ROOT/tools/pack_antegg.py" \
   --manifest "$ROOT/packaging/egg.json" \
+  --preloader-manifest "$ROOT/packaging/manifest.json" \
+  --icon "$ROOT/assets/icon/icon.png" \
   --library "$LIBRARY" \
   --entry bin/libbitematica.so \
   --config "$ROOT/packaging/config" \
