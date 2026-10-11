@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BiteMatica Settings",
+  "description": "Settings for the BiteMatica schematic overlay. Editable here or from the in-game Mod Menu.",
+  "type": "object",
+  "properties": {
+    "version": { "title": "Version", "type": "integer", "readOnly": true },
+    "enabled": {
+      "title": "Enabled",
+      "description": "Turns the schematic overlay on or off.",
+      "type": "boolean"
+    },
+    "renderMode": {
+      "title": "Render Mode",
+      "description": "0 draws translucent blocks, 1 draws only the bounding box, 2 draws nothing.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2
+    },
+    "opacity": {
+      "title": "Opacity",
+      "description": "Overlay opacity in percent.",
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 100
+    },
+    "showMaterialList": {
+      "title": "Material List",
+      "description": "Shows the block count panel.",
+      "type": "boolean"
+    },
+    "showToolbar": {
+      "title": "Toolbar",
+      "description": "Shows the on-screen toolbar.",
+      "type": "boolean"
+    },
+    "ghostPlacement": {
+      "title": "Ghost Placement",
+      "description": "Outlines where the build would sit in the world.",
+      "type": "boolean"
+    },
+    "onlyExposed": {
+      "title": "Exposed Faces Only",
+      "description": "Skips fully enclosed blocks when meshing.",
+      "type": "boolean"
+    },
+    "maxRenderBlocks": {
+      "title": "Render Block Cap",
+      "description": "Upper bound on blocks meshed per frame.",
+      "type": "integer",
+      "minimum": 500,
+      "maximum": 250000
+    },
+    "toolbarX": { "title": "Toolbar X", "type": "integer", "minimum": 0 },
+    "toolbarY": { "title": "Toolbar Y", "type": "integer", "minimum": 0 },
+    "materialX": { "title": "Material Panel X", "type": "integer", "minimum": 0 },
+    "materialY": { "title": "Material Panel Y", "type": "integer", "minimum": 0 },
+    "maxRenderDistance": {
+      "title": "Max Render Distance",
+      "description": "Blocks beyond which the overlay is not drawn; 0 means unlimited.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "lastLoadedFile": { "title": "Last Loaded File", "type": "string", "readOnly": true }
+  }
+}
