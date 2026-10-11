@@ -58,6 +58,7 @@
 #include "mod/ControllerNavigator.hpp"
 #include "mod/GameWorldSource.hpp"
 #include "mod/JsonConfig.hpp"
+#include "mod/LocalPlayerFeed.hpp"
 #include "mod/SchematicLibrary.hpp"
 #include "render/GameCamera.hpp"
 #include "render/HudOverlay.hpp"
@@ -229,6 +230,12 @@ private:
   };
   RenderSeam mRenderSeam{RenderSeam::None};
 
+  // Diagnostics, so a failure is visible on screen instead of silent.
+  std::atomic<unsigned long long> mFramesDrawn{0};
+  std::atomic<unsigned long long> mFramesWithoutCamera{0};
+  int mViewportWidth{0};
+  int mViewportHeight{0};
+
   /// True when a per-frame seam was installed (EGL or preloader), so the schematic is drawn as
   /// world-space GL geometry rather than through the software overlay.
   bool worldSpaceActive() const { return mRenderSeam != RenderSeam::None; }
@@ -280,6 +287,8 @@ private:
   float mMenuIconY{};
   float mMenuIconSize{52.0f};
 
+  /// Retries the EGL hook install; called from enable and from input while the game is live.
+  void retryRenderSeam();
   /// Rebuilds the menu pages from the live config and placement state.
   void rebuildMenuPages();
   /// Handles a tap while the menu is open. Returns true when the tap was consumed.
@@ -331,6 +340,10 @@ bool BiteMaticaMod::enable() {
   mEnabled.store(true, std::memory_order_release);
   registerMenuModule();
   installInputCallbacks();
+  // Hook the local player first: it is the camera source, and it is the mechanism proven across
+  // 1.26.33 / 1.26.50 / 1.26.51, so it is what makes world-space rendering work on those builds.
+  bitematica::mod::LocalPlayerFeed::install();
+
   // Install the per-frame render seam. The EGL hook is the primary path because it is
   // version-independent; the SDK callback is a fallback. Only when neither is available does the mod
   // fall back to the software overlay.
@@ -438,6 +451,10 @@ void BiteMaticaMod::installInputCallbacks() {
 }
 
 bool BiteMaticaMod::handleTouch(float x, float y) {
+  // Input only arrives while the game is live, so it is the reliable moment to finish installing the
+  // EGL hook if the game had not mapped a GLES library when the mod enabled.
+  retryRenderSeam();
+
   // The menu (and its floating icon) is checked first, so a tap on the icon or a menu row is never
   // swallowed by the toolbar underneath.
   if (handleMenuTouch(x, y)) return true;
@@ -514,18 +531,25 @@ void BiteMaticaMod::installRenderCallback() {
   //
   // Hooking EGL is what removes the game-build gate: the camera comes from the game's own matrices
   // (found by GameCamera), not from a per-build player accessor.
-  bitematica::render::GameCamera::resolveOnce();
-  const bool eglHooked = bitematica::gles::EglFrameSource::install();
-  if (eglHooked) {
-    bitematica::gles::EglFrameSource::setCallback([this] { onRenderFrame(); });
-    mRenderSeam = RenderSeam::Egl;
-  } else if (bitematica::mod::SdkRender::available()) {
+  // The callback is registered once; the EGL hook itself may install now or on a later retry, and
+  // `retryRenderSeam` covers the case where the game had not mapped a GLES library yet.
+  bitematica::gles::EglFrameSource::setCallback([this] { onRenderFrame(); });
+  if (bitematica::mod::SdkRender::available()) {
     bitematica::mod::SdkRender::registerCallback([this](const pl::render::RenderContext &) {
       onRenderFrame();
     });
+  }
+  retryRenderSeam();
+}
+
+void BiteMaticaMod::retryRenderSeam() {
+  // Called from `enable` and again from every touch/key event, so the EGL hook installs as soon as
+  // the game has loaded its GLES library. Idempotent and cheap once it succeeds.
+  if (mRenderSeam == RenderSeam::Egl) return;
+  if (bitematica::gles::EglFrameSource::install()) {
+    mRenderSeam = RenderSeam::Egl;
+  } else if (bitematica::mod::SdkRender::available() && mRenderSeam == RenderSeam::None) {
     mRenderSeam = RenderSeam::Preloader;
-  } else {
-    mRenderSeam = RenderSeam::None;
   }
 }
 
@@ -537,16 +561,41 @@ void BiteMaticaMod::onRenderFrame() {
     if (!mRenderSnapshot.enabled) return;
   }
 
-  // The camera comes from the game's own matrices. `GameCamera` finds them by scanning for a
-  // perspective projection preceded by a rigid view matrix, which needs no per-build player
-  // accessor — that is what makes this work on every 1.26 build.
+  // The camera is built from the local player feed, which is hooked on the accessor the game itself
+  // calls every frame. This is the same mechanism the launcher's own in-world features use, and it
+  // is proven across 1.26.33 / 1.26.50 / 1.26.51 — so it needs neither the SDK render callback nor a
+  // speculative matrix scan.
   bitematica::render::CameraFrame camera;
+  camera.viewportWidth = mViewportWidth;
+  camera.viewportHeight = mViewportHeight;
+
+  // The real game matrices are preferred when they are available (a newer launcher), but the
+  // player-derived camera is always there as the reliable path.
   if (mRenderSeam == RenderSeam::Egl) {
     int width = 0;
     int height = 0;
     bitematica::gles::EglFrameSource::readViewport(width, height);
-    bitematica::render::GameCamera::setViewport(width, height);
-    camera = bitematica::render::GameCamera::read();
+    if (width > 0 && height > 0) {
+      mViewportWidth = width;
+      mViewportHeight = height;
+      camera.viewportWidth = width;
+      camera.viewportHeight = height;
+    }
+  }
+
+  float aspect = 16.0f / 9.0f;
+  if (camera.viewportHeight > 0) {
+    aspect = static_cast<float>(camera.viewportWidth) / static_cast<float>(camera.viewportHeight);
+  }
+  bitematica::render::Mat4 viewProjection;
+  bitematica::render::Vec3 eye;
+  bitematica::render::Vec3 forward;
+  if (bitematica::mod::LocalPlayerFeed::buildLocalCamera(70.0f, aspect, 0.05f, 1024.0f,
+                                                         viewProjection, eye, forward)) {
+    camera.viewProjection = viewProjection;
+    camera.position = eye;
+    camera.forward = forward;
+    camera.valid = true;
   }
   drawWorldSpace(camera);
 }
@@ -572,32 +621,17 @@ void BiteMaticaMod::drawWorldSpace(const bitematica::render::CameraFrame &camera
   // Upload any mesh the worker finished.
   uploadPendingMesh();
 
-  // Camera: the game's real world-space matrices when GameCamera found them, otherwise the
-  // first-person approximation from the local player. Never a guess.
-  bitematica::render::Mat4 viewProjection;
-  bool haveCamera = false;
-  if (camera.valid &&
-      bitematica::render::looksWorldSpace(camera.viewProjection, camera.position, camera.forward)) {
-    viewProjection = camera.viewProjection;
-    haveCamera = true;
+  // The camera is already a validated world->clip matrix (from the player feed or the game's own
+  // matrices). If it is not valid there is no live player, so there is nothing to draw against.
+  if (!camera.valid) {
+    mFramesWithoutCamera.fetch_add(1, std::memory_order_relaxed);
+    return;
   }
-  if (!haveCamera) {
-    float aspect = 16.0f / 9.0f;
-    if (camera.viewportHeight > 0) {
-      aspect = static_cast<float>(camera.viewportWidth) / static_cast<float>(camera.viewportHeight);
-    }
-    pl::render::Mat4 sdkProjection;
-    if (!bitematica::mod::SdkRender::computeViewProjection(70.0f, aspect, 0.05f, 1024.0f,
-                                                           sdkProjection)) {
-      return; // no camera at all this frame: draw nothing rather than guess
-    }
-    for (int i = 0; i < 16; ++i) viewProjection.m[i] = sdkProjection.m[i];
-  }
+  const bitematica::render::Mat4 &viewProjection = camera.viewProjection;
 
   // Track the camera position for "move to player" and the distance cull.
-  if (camera.valid) {
-    mPlayerPosition = camera.position;
-  }
+  mPlayerPosition = camera.position;
+  mFramesDrawn.fetch_add(1, std::memory_order_relaxed);
 
   const bitematica::world::Placement &placement = snapshot.placement;
   const bitematica::render::Vec3 origin{static_cast<float>(placement.origin.x),
@@ -1108,12 +1142,23 @@ void BiteMaticaMod::refreshStatusLine() {
                           ? "all"
                           : (mConfig.layerMode == bitematica::mod::LayerMode::Single ? "layer"
                                                                                      : "range");
-  char buffer[220];
+  // The status line carries the live diagnostics: which render seam is active, whether the camera
+  // feed is live, and whether frames are actually being drawn. A silent failure is what made the
+  // earlier builds hard to diagnose, so the numbers are on screen.
+  char cameraState[96];
+  std::snprintf(cameraState, sizeof(cameraState), "%s cam:%s draw:%llu nocam:%llu",
+                worldSpaceActive()
+                    ? (mRenderSeam == RenderSeam::Egl ? "world-space (egl)" : "world-space (sdk)")
+                    : "software overlay",
+                bitematica::mod::LocalPlayerFeed::diagnostic(),
+                mFramesDrawn.load(std::memory_order_relaxed),
+                mFramesWithoutCamera.load(std::memory_order_relaxed));
+
+  char buffer[320];
   std::snprintf(buffer, sizeof(buffer), "%s  %dx%dx%d  %s  %s  rot %d  @%d,%d,%d  %s",
                 schematic().name.c_str(), schematic().sizeX(), schematic().sizeY(),
                 schematic().sizeZ(), mode, layer, static_cast<int>(mPlacement.rotation) * 90,
-                mPlacement.origin.x, mPlacement.origin.y, mPlacement.origin.z,
-                worldSpaceActive() ? (mRenderSeam == RenderSeam::Egl ? "world-space (egl)" : "world-space") : "software overlay");
+                mPlacement.origin.x, mPlacement.origin.y, mPlacement.origin.z, cameraState);
   setStatus(buffer);
 }
 
@@ -1153,11 +1198,12 @@ void BiteMaticaMod::submitHud() {
       softwareOverlay && mHasSchematic);
 
   // The floating menu icon is always drawn, so the menu is reachable with a tap and never needs a
-  // keyboard or the Mod Menu. It sits just below the toolbar so it does not cover it.
+  // keyboard or the Mod Menu. It is anchored to the top-left of the screen rather than relative to
+  // the toolbar, so it stays on screen whatever the toolbar anchor is set to and cannot be pushed
+  // off the edge by a small viewport.
   const float iconSize = 52.0f;
-  const float iconX = static_cast<float>(mConfig.toolbarX);
-  const float iconY = static_cast<float>(mConfig.toolbarY) +
-                      (bitematica::render::HudOverlay::kButtonSize * 4.0f) + 40.0f;
+  const float iconX = 12.0f;
+  const float iconY = 12.0f;
   const auto icon = bitematica::ui::MenuRenderer::layoutIcon(iconX, iconY, iconSize, mMenuOpen);
   mMenuIconX = iconX;
   mMenuIconY = iconY;
