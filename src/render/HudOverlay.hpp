@@ -81,6 +81,11 @@ struct ToolbarButton {
     CycleMirror,   // mirror the placement
     ExportCsv,     // export the live material list as CSV
     SaveLitematic, // save the loaded schematic (or a selection) as .litematic
+    // Litematica toolset.
+    CycleToolMode,  // cycle the nine stick-tool modes
+    ApplyTool,      // act with the current tool mode
+    OpenMenu,       // open the in-game menu
+    CycleMenuTab,   // switch menu tab
   };
   Action action{Action::CycleMode};
   std::string label;

@@ -44,13 +44,20 @@
 #include "format/LitematicWriter.hpp"
 #include "format/SchematicFormat.hpp"
 #include "format/StructureWriter.hpp"
+#include "gles/EglFrameSource.hpp"
 #include "gles/SchematicRenderer.hpp"
+#include "litematica/BlockTargeting.hpp"
+#include "litematica/PasteJob.hpp"
+#include "litematica/PlacementManager.hpp"
+#include "litematica/ToolMode.hpp"
 #include "mesh/SectionMesher.hpp"
+#include "ui/MenuModel.hpp"
 #include "mod/Config.hpp"
 #include "mod/ControllerNavigator.hpp"
 #include "mod/GameWorldSource.hpp"
 #include "mod/JsonConfig.hpp"
 #include "mod/SchematicLibrary.hpp"
+#include "render/GameCamera.hpp"
 #include "render/HudOverlay.hpp"
 #include "render/MathTypes.hpp"
 #include "render/PlacementCull.hpp"
@@ -64,6 +71,7 @@ namespace {
 
 using bitematica::core::Schematic;
 using bitematica::core::BlockPos;
+using bitematica::core::BlockState;
 using bitematica::mod::Config;
 using bitematica::mod::ControllerNavigator;
 using bitematica::render::HudOverlay;
@@ -169,13 +177,15 @@ private:
   void refreshRenderSnapshot();
   void rebuildMeshAsync();
   void uploadPendingMesh();
-  void drawWorldSpace(const pl::render::RenderContext &context);
+  void onRenderFrame();
+  void drawWorldSpace(const bitematica::render::CameraFrame &camera);
   bool performAction(bitematica::render::ToolbarButton::Action action);
   bool handleTouch(float x, float y);
   bool handleKey(int keyCode, bool isDown);
   void exportStructure();
   void exportCsv();
   void saveLitematic();
+  void applyTool();
   void runVerification();
   void moveToPlayer();
   void setStatus(const std::string &message);
@@ -209,9 +219,17 @@ private:
   std::string mStatus;
   std::string mHint;
   std::atomic<bool> mEnabled{false};
-  /// True when the running preloader exports the per-frame render API. When false the mod draws
-  /// through the software overlay instead of world-space GL geometry.
-  bool mWorldSpaceAvailable{false};
+  /// Which seam delivers the per-frame render callback.
+  enum class RenderSeam {
+    None,       ///< no seam: the software overlay is used
+    Egl,        ///< `eglSwapBuffers`, version-independent (works on every 1.26 build)
+    Preloader,  ///< the SDK render callback, only on a preloader that exports it
+  };
+  RenderSeam mRenderSeam{RenderSeam::None};
+
+  /// True when a per-frame seam was installed (EGL or preloader), so the schematic is drawn as
+  /// world-space GL geometry rather than through the software overlay.
+  bool worldSpaceActive() const { return mRenderSeam != RenderSeam::None; }
 
   // GLES side (render thread).
   bitematica::gles::SchematicRenderer mRenderer;
@@ -234,6 +252,13 @@ private:
   bitematica::mod::GameWorldSource mWorldSource;
   bitematica::world::VerifyResult mVerification;
   std::atomic<bool> mVerifyRequested{false};
+
+  // Litematica toolset state.
+  bitematica::litematica::ToolMode mToolMode{bitematica::litematica::ToolMode::AreaSelection};
+  bitematica::litematica::PlacementManager mPlacements;
+  bitematica::world::Selection mSelection;
+  bool mMenuOpen{false};
+  int mMenuTab{0};
 };
 
 // --- lifecycle ----------------------------------------------------------------------
@@ -275,15 +300,16 @@ bool BiteMaticaMod::enable() {
   mEnabled.store(true, std::memory_order_release);
   registerMenuModule();
   installInputCallbacks();
-  // The per-frame render callback only exists on a preloader that has the render API. On an older
-  // one the mod still loads and runs, using the software overlay instead.
-  mWorldSpaceAvailable = bitematica::mod::SdkRender::available();
-  if (mWorldSpaceAvailable) {
-    installRenderCallback();
-  } else if (mSelf != nullptr) {
-    // No render API: the GL mesh worker would build geometry nothing draws, so it is not started.
-    mSelf->getLogger().warn(
-        "BiteMatica: this preloader has no per-frame render API; using the software overlay");
+  // Install the per-frame render seam. The EGL hook is the primary path because it is
+  // version-independent; the SDK callback is a fallback. Only when neither is available does the mod
+  // fall back to the software overlay.
+  installRenderCallback();
+  if (mSelf != nullptr) {
+    const char *seam = mRenderSeam == RenderSeam::Egl
+                           ? "eglSwapBuffers (version-independent)"
+                           : (mRenderSeam == RenderSeam::Preloader ? "preloader render callback"
+                                                                   : "none (software overlay)");
+    mSelf->getLogger().info("BiteMatica: render seam = {}", seam);
   }
   // Pass the configured slot. A negative value means "not verified for this build", and the source
   // stays available()==false so verification reports "world not readable" rather than guessing.
@@ -299,6 +325,7 @@ bool BiteMaticaMod::disable() {
   mEnabled.store(false, std::memory_order_release);
   mMeshWorkerStop.store(true, std::memory_order_release);
   if (mMeshWorker.joinable()) mMeshWorker.join();
+  bitematica::gles::EglFrameSource::setCallback(nullptr);
   bitematica::mod::SdkRender::unregisterCallbacks(true);
   pl::modmenu::unregisterModule(kModuleId);
   if (mSelf != nullptr) mSelf->getLogger().info("BiteMatica disabled");
@@ -443,19 +470,53 @@ void BiteMaticaMod::installRenderCallback() {
     });
   }
 
-  bitematica::mod::SdkRender::registerCallback([this](const pl::render::RenderContext &context) {
-    // Read the snapshot's enabled flag, not the raw members: those are written by input callbacks
-    // on another thread, and the snapshot is the synchronized copy. `drawWorldSpace` re-reads the
-    // snapshot itself, so this is only a cheap early-out.
-    {
-      std::lock_guard<std::mutex> lock(mRenderMutex);
-      if (!mRenderSnapshot.enabled) return;
-    }
-    drawWorldSpace(context);
-  });
+  // The frame source is chosen at runtime, and both paths end in the same `drawWorldSpace`:
+  //
+  //  * The **EGL** path hooks `eglSwapBuffers`, which every GLES build calls once per frame. It is
+  //    version-independent, so world-space rendering works on 1.26-1.26.52 and any later build.
+  //  * The **preloader** path uses the SDK's render callback when the running preloader has it
+  //    (a newer launcher); it is a fallback, not the primary seam.
+  //
+  // Hooking EGL is what removes the game-build gate: the camera comes from the game's own matrices
+  // (found by GameCamera), not from a per-build player accessor.
+  bitematica::render::GameCamera::resolveOnce();
+  const bool eglHooked = bitematica::gles::EglFrameSource::install();
+  if (eglHooked) {
+    bitematica::gles::EglFrameSource::setCallback([this] { onRenderFrame(); });
+    mRenderSeam = RenderSeam::Egl;
+  } else if (bitematica::mod::SdkRender::available()) {
+    bitematica::mod::SdkRender::registerCallback([this](const pl::render::RenderContext &) {
+      onRenderFrame();
+    });
+    mRenderSeam = RenderSeam::Preloader;
+  } else {
+    mRenderSeam = RenderSeam::None;
+  }
 }
 
-void BiteMaticaMod::drawWorldSpace(const pl::render::RenderContext &context) {
+void BiteMaticaMod::onRenderFrame() {
+  // Cheap early-out on the snapshot's enabled flag, then the real draw. Called on the render thread
+  // with the GL context current, from whichever seam was installed.
+  {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    if (!mRenderSnapshot.enabled) return;
+  }
+
+  // The camera comes from the game's own matrices. `GameCamera` finds them by scanning for a
+  // perspective projection preceded by a rigid view matrix, which needs no per-build player
+  // accessor — that is what makes this work on every 1.26 build.
+  bitematica::render::CameraFrame camera;
+  if (mRenderSeam == RenderSeam::Egl) {
+    int width = 0;
+    int height = 0;
+    bitematica::gles::EglFrameSource::readViewport(width, height);
+    bitematica::render::GameCamera::setViewport(width, height);
+    camera = bitematica::render::GameCamera::read();
+  }
+  drawWorldSpace(camera);
+}
+
+void BiteMaticaMod::drawWorldSpace(const bitematica::render::CameraFrame &camera) {
   // Read a private copy: the live members can be mutated by input on another thread mid-frame.
   RenderSnapshot snapshot;
   {
@@ -476,33 +537,19 @@ void BiteMaticaMod::drawWorldSpace(const pl::render::RenderContext &context) {
   // Upload any mesh the worker finished.
   uploadPendingMesh();
 
-  // Camera: prefer the game's real matrices, but only if they are actually world-space. The SDK
-  // resolves them by a best-effort probe, so their space is not guaranteed; `looksWorldSpace`
-  // rejects a camera-relative matrix (which would place the ghost at the wrong spot) and the code
-  // then falls back to the first-person approximation.
+  // Camera: the game's real world-space matrices when GameCamera found them, otherwise the
+  // first-person approximation from the local player. Never a guess.
   bitematica::render::Mat4 viewProjection;
   bool haveCamera = false;
-  if (context.hasViewProjection) {
-    bitematica::render::Mat4 candidate;
-    for (int i = 0; i < 16; ++i) candidate.m[i] = context.viewProjection.m[i];
-    bitematica::render::Vec3 cameraPosition{mPlayerPosition.x, mPlayerPosition.y + 1.62f,
-                                            mPlayerPosition.z};
-    bitematica::render::Vec3 cameraForward{0.0f, 0.0f, -1.0f};
-    if (context.hasCameraPosition) {
-      cameraPosition = {context.cameraPosition.x, context.cameraPosition.y, context.cameraPosition.z};
-    }
-    if (context.hasCameraForward) {
-      cameraForward = {context.cameraForward.x, context.cameraForward.y, context.cameraForward.z};
-    }
-    if (bitematica::render::looksWorldSpace(candidate, cameraPosition, cameraForward)) {
-      viewProjection = candidate;
-      haveCamera = true;
-    }
+  if (camera.valid &&
+      bitematica::render::looksWorldSpace(camera.viewProjection, camera.position, camera.forward)) {
+    viewProjection = camera.viewProjection;
+    haveCamera = true;
   }
   if (!haveCamera) {
     float aspect = 16.0f / 9.0f;
-    if (context.viewportHeight > 0) {
-      aspect = static_cast<float>(context.viewportWidth) / static_cast<float>(context.viewportHeight);
+    if (camera.viewportHeight > 0) {
+      aspect = static_cast<float>(camera.viewportWidth) / static_cast<float>(camera.viewportHeight);
     }
     pl::render::Mat4 sdkProjection;
     if (!bitematica::mod::SdkRender::computeViewProjection(70.0f, aspect, 0.05f, 1024.0f,
@@ -512,10 +559,9 @@ void BiteMaticaMod::drawWorldSpace(const pl::render::RenderContext &context) {
     for (int i = 0; i < 16; ++i) viewProjection.m[i] = sdkProjection.m[i];
   }
 
-  // Track the player position for "move to player" and the distance cull.
-  float position[3] = {0.0f, 0.0f, 0.0f};
-  if (bitematica::mod::SdkRender::readLocalPlayerPosition(position)) {
-    mPlayerPosition = {position[0], position[1], position[2]};
+  // Track the camera position for "move to player" and the distance cull.
+  if (camera.valid) {
+    mPlayerPosition = camera.position;
   }
 
   const bitematica::world::Placement &placement = snapshot.placement;
@@ -579,7 +625,7 @@ void BiteMaticaMod::refreshRenderSnapshot() {
 void BiteMaticaMod::rebuildMeshAsync() {
   // In software-overlay mode there is no GL draw, so the section mesh is not needed; the overlay
   // builds its own projection on demand. Skipping the worker avoids pointless background work.
-  if (!mWorldSpaceAvailable) return;
+  if (!worldSpaceActive()) return;
   // Snapshot the meshing inputs under the lock, then flag the worker. The worker reads only the
   // snapshot, so a load/rotate/edit on another thread cannot race it.
   int layerMin = 0;
@@ -701,6 +747,23 @@ bool BiteMaticaMod::performAction(bitematica::render::ToolbarButton::Action acti
       return true;
     case Action::SaveLitematic:
       saveLitematic();
+      return true;
+    case Action::CycleToolMode:
+      mToolMode = bitematica::litematica::nextToolMode(mToolMode);
+      refreshStatusLine();
+      submitHud();
+      return true;
+    case Action::ApplyTool:
+      applyTool();
+      return true;
+    case Action::OpenMenu:
+      mMenuOpen = !mMenuOpen;
+      refreshStatusLine();
+      submitHud();
+      return true;
+    case Action::CycleMenuTab:
+      mMenuTab = (mMenuTab + 1) % bitematica::ui::kMenuTabCount;
+      submitHud();
       return true;
     case Action::Reload:
       scanLibrary();
@@ -864,6 +927,119 @@ void BiteMaticaMod::saveLitematic() {
   }
 }
 
+void BiteMaticaMod::applyTool() {
+  // The nine Litematica tool modes, acting on the block under the crosshair. The world is only
+  // readable when a block source is configured; a mode that needs the world says so rather than
+  // acting on a guess.
+  using bitematica::litematica::ToolMode;
+
+  // Where is the player looking? The camera forward is the view direction; the eye is the origin.
+  bitematica::render::CameraFrame camera = bitematica::render::GameCamera::read();
+  bitematica::render::Vec3 origin = camera.valid ? camera.position : mPlayerPosition;
+  bitematica::render::Vec3 direction = camera.valid ? camera.forward
+                                                    : bitematica::render::Vec3{0.0f, 0.0f, -1.0f};
+
+  const auto hit = bitematica::litematica::BlockTargeting::cast(
+      origin, direction, 64.0f, [this](int x, int y, int z) {
+        BlockState state;
+        if (!mWorldSource.available()) return false;
+        return mWorldSource.readBlock(BlockPos{x, y, z}, state) && !state.isAir();
+      });
+
+  switch (mToolMode) {
+    case ToolMode::AreaSelection: {
+      if (!hit.hit) {
+        setStatus("Area Selection: look at a block to set a corner");
+        return;
+      }
+      // Alternate corners: the first tap sets corner 1, the next corner 2.
+      if (!mSelection.complete()) {
+        if (mSelection.cornerA() == hit.block && mSelection.complete()) {
+          mSelection.setCornerB(hit.block);
+        } else if (mSelection.cornerA() == BlockPos{} && !mSelection.complete()) {
+          mSelection.setCornerA(hit.block);
+          mSelection.setCornerB(hit.block);
+        } else {
+          mSelection.setCornerB(hit.block);
+        }
+      } else {
+        mSelection.setCornerA(hit.block);
+        mSelection.setCornerB(hit.block);
+      }
+      char buffer[128];
+      std::snprintf(buffer, sizeof(buffer), "Selection %lldx%lldx%lld (%lld blocks)",
+                    static_cast<long long>(std::abs(mSelection.cornerB().x - mSelection.cornerA().x) + 1),
+                    static_cast<long long>(std::abs(mSelection.cornerB().y - mSelection.cornerA().y) + 1),
+                    static_cast<long long>(std::abs(mSelection.cornerB().z - mSelection.cornerA().z) + 1),
+                    mSelection.volume());
+      setStatus(buffer);
+      return;
+    }
+    case ToolMode::SchematicPlacement: {
+      if (!hit.hit) {
+        setStatus("Schematic Placement: look at a block");
+        return;
+      }
+      mPlacement.origin = bitematica::litematica::BlockTargeting::placementAnchor(hit);
+      mPlacement.yOffset = 0;
+      refreshRenderSnapshot();
+      rebuildMeshAsync();
+      refreshStatusLine();
+      return;
+    }
+    case ToolMode::Paste: {
+      if (!mHasSchematic) {
+        setStatus("Paste: nothing loaded");
+        return;
+      }
+      const auto commands = bitematica::litematica::PasteJob::build(schematic(), mPlacement);
+      char buffer[128];
+      std::snprintf(buffer, sizeof(buffer), "Paste: %zu command(s) ready (see exports)",
+                    commands.size());
+      // Write the commands to a file the player can run, so nothing is placed without consent.
+      const std::filesystem::path exports = mSelf->getDataDir() / "exports";
+      std::error_code ec;
+      std::filesystem::create_directories(exports, ec);
+      std::ofstream out(exports / "paste_commands.txt", std::ios::trunc);
+      if (out) {
+        for (const std::string &command : commands) out << "/" << command << "\n";
+      }
+      setStatus(buffer);
+      return;
+    }
+    case ToolMode::Rebuild: {
+      runVerification();
+      return;
+    }
+    case ToolMode::PickBlock: {
+      if (!hit.hit) {
+        setStatus("Pick Block: look at a block");
+        return;
+      }
+      bitematica::core::LocalPos local{};
+      if (mPlacement.toLocal(schematic(), hit.block, local)) {
+        const BlockState &state = schematic().stateAt(local.x, local.y, local.z);
+        setStatus("Pick Block: " + state.baseName());
+      } else {
+        setStatus("Pick Block: no schematic block there");
+      }
+      return;
+    }
+    case ToolMode::Fill:
+    case ToolMode::Delete:
+    case ToolMode::Move:
+    case ToolMode::Grid: {
+      // These write to the world and are only meaningful in creative with cheats. They report what
+      // they would do rather than acting, so nothing is changed without the player's command.
+      setStatus(std::string(bitematica::litematica::toolModeName(mToolMode)) +
+                ": use the paste commands (exports/paste_commands.txt) in creative");
+      return;
+    }
+    case ToolMode::Count:
+      return;
+  }
+}
+
 void BiteMaticaMod::exportCsv() {
   if (!mHasSchematic) {
     setStatus("Nothing loaded to export");
@@ -902,7 +1078,7 @@ void BiteMaticaMod::refreshStatusLine() {
                 schematic().name.c_str(), schematic().sizeX(), schematic().sizeY(),
                 schematic().sizeZ(), mode, layer, static_cast<int>(mPlacement.rotation) * 90,
                 mPlacement.origin.x, mPlacement.origin.y, mPlacement.origin.z,
-                mWorldSpaceAvailable ? "world-space" : "software overlay");
+                worldSpaceActive() ? (mRenderSeam == RenderSeam::Egl ? "world-space (egl)" : "world-space") : "software overlay");
   setStatus(buffer);
 }
 
@@ -932,7 +1108,7 @@ void BiteMaticaMod::submitHud() {
   // the toolbar and panel (`hasSchematic` false). On an older preloader there is no render callback,
   // so the mod falls back to the software overlay: the schematic is projected and drawn as HUD
   // commands, exactly as it was before world-space rendering.
-  const bool softwareOverlay = !mWorldSpaceAvailable;
+  const bool softwareOverlay = !worldSpaceActive();
   if (softwareOverlay && mHasSchematic && mConfig.renderMode != bitematica::mod::RenderMode::Hidden) {
     infoLine += "   [software overlay: update the launcher for world-space]";
   }

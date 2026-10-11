@@ -266,7 +266,7 @@ void testToolbarHitTest() {
   const auto buttons = bitematica::render::HudOverlay::layoutToolbar(config);
   // Twelve original controls plus six world-space additions (verify, layers, move, rotate,
   // mirror, CSV export).
-  check(buttons.size() == 19, "nineteen toolbar buttons, got " +
+  check(buttons.size() == 23, "twenty-three toolbar buttons, got " +
                                   std::to_string(buttons.size()));
 
   const auto &first = buttons.front();
@@ -284,7 +284,7 @@ void testToolbarHitTest() {
 void testControllerNavigation() {
   std::printf("testControllerNavigation\n");
   bitematica::mod::ControllerNavigator nav;
-  const int count = 19;
+  const int count = 23;
 
   auto result = nav.handleKey(bitematica::mod::ControllerNavigator::DpadRight, true, count);
   check(result.handled && !result.activated, "d-pad right moves focus, does not activate");
