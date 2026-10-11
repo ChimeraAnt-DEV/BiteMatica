@@ -76,6 +76,11 @@ jobs:
       - name: Run host tests (world space - placement, mesher, verification, translation)
         run: ./build/host/bitematica_world_tests
 
+      - name: Check the mod loads on an older preloader (weak render symbols)
+        run: |
+          chmod +x test/link_check.sh
+          PRELOADER_INCLUDE=third_party/preloader-android/include test/link_check.sh
+
       - name: Build and package .AntEgg
         run: |
           chmod +x build.sh
@@ -112,6 +117,11 @@ jobs:
                   sys.exit("manifest.json icon is not in the package")
           print("package layout OK")
           PY
+
+      - name: Verify the packaged .so is loadable (weak render symbols)
+        run: |
+          python3 tools/verify_antegg.py "$(ls dist/*.antegg | head -1)" \
+            --require-weak pl::render::
 
       - name: Upload .AntEgg artifact
         uses: actions/upload-artifact@v4
