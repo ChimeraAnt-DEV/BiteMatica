@@ -97,10 +97,27 @@ src/render/HudOverlay.cpp src/mod/ControllerNavigator.cpp src/mod/JsonConfig.cpp
 - **Meshing must not run on the render thread.** `BiteMaticaMod` builds meshes on a worker and
   hands finished `SectionMesh`es to the render thread through a mutex-guarded slot; the render
   callback only uploads buffers and draws.
+- **The worker reads only a snapshot.** `rebuildMeshAsync` copies the schematic, placement and
+  meshing config into a `MeshRequest` under `mRequestMutex`; the worker must never touch the live
+  members, which input callbacks mutate. `drawWorldSpace` likewise reads a `RenderSnapshot`
+  (`mRenderMutex`), refreshed by `refreshRenderSnapshot` (called from `submitHud`, `moveToPlayer`
+  and load). Do not read `mSchematic`/`mPlacement`/`mConfig` directly from either thread.
+- **`mMeshWorkerStop` must be cleared before starting the worker.** `disable()`/`unload()` set it
+  and join; `installRenderCallback` stores `false` first. Forgetting that leaves the new thread
+  exiting immediately, so nothing meshes after a re-enable.
+- **The worker must always be joined.** A joinable `std::thread` destroyed while joinable calls
+  `std::terminate`. `disable()`, `unload()` and the destructor all stop-and-join.
+- **Culling happens in placement-local space, not world space.** `SchematicRenderer::draw` takes a
+  frustum built from `viewProjection * placementLocalToWorld(origin, yaw)` and a camera transformed
+  by `worldToPlacementLocal`. Section boxes are axis-aligned in local space, so a rotated placement
+  is no longer wrongly culled at the screen edges, and the distance test compares like-for-like.
+  `placementLocalToWorld` must match the vertex shader's rotation signs exactly (test-pinned).
 - **GL state save/restore is exhaustive on purpose.** `SchematicRenderer::saveState`/`restoreState`
-  cover program, VAO, both buffer bindings, the texture binding, blend, depth test, cull, depth
-  mask, depth func, cull mode, front face and blend factors, and `restoreState` runs even when no
-  section is drawn. A stale binding left behind corrupts the game's next draw.
+  cover program, VAO, both buffer bindings, `GL_ACTIVE_TEXTURE`, blend, depth test, cull, depth
+  mask, depth func, cull mode, front face, both blend factor pairs, both blend equations, stencil,
+  scissor and colour mask; `restoreState` runs even when no section is drawn. The shader binds no
+  texture, so the 2D texture binding is deliberately not touched — only the active unit is restored.
+- **Uniform locations are resolved once at init**, not per frame.
 - **The package must contain its `egg.json` entry point.** `pack_antegg.py` refuses to run
   when `egg.json`'s `entry_point` and `--entry` disagree; the loader would reject it later.
 

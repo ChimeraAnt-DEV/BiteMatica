@@ -93,6 +93,35 @@ struct PendingMesh {
   bool truncated{};
 };
 
+/// An immutable snapshot of everything the mesher needs.
+///
+/// The worker thread must never read the mod's live state: a schematic load or a rotate happening
+/// mid-mesh would otherwise race with it and crash. `rebuildMeshAsync` copies the schematic,
+/// placement and the meshing-relevant config into one of these under a mutex, and the worker only
+/// ever sees its own copy.
+struct MeshRequest {
+  Schematic schematic;
+  bitematica::world::Placement placement;
+  int layerMin{};
+  int layerMax{};
+  int maxTriangles{};
+};
+
+/// An immutable snapshot of the state the render callback reads.
+///
+/// The render callback runs on the render thread while touch/key/menu callbacks may mutate the
+/// placement and config, so it reads this copy rather than the live members. Writers refresh it
+/// under the mutex; the callback takes its own copy at the top of the frame.
+struct RenderSnapshot {
+  bool enabled{};
+  bool hasSchematic{};
+  int renderMode{};
+  bool verifyAgainstWorld{};
+  float opacity{1.0f};
+  float renderDistance{256.0f};
+  bitematica::world::Placement placement;
+};
+
 /// All mutable mod state. Kept in one object so the callbacks can reach it without file-scope
 /// globals scattered across the translation unit.
 class BiteMaticaMod {
@@ -102,10 +131,21 @@ public:
     return mod;
   }
 
+  BiteMaticaMod() = default;
+  BiteMaticaMod(const BiteMaticaMod &) = delete;
+  BiteMaticaMod &operator=(const BiteMaticaMod &) = delete;
+
   bool load();
   bool enable();
   bool disable();
   bool unload();
+
+  /// Safety net: a joinable std::thread destroyed while joinable calls std::terminate, so the
+  /// worker is stopped and joined if the object is ever destroyed without disable()/unload().
+  ~BiteMaticaMod() {
+    mMeshWorkerStop.store(true, std::memory_order_release);
+    if (mMeshWorker.joinable()) mMeshWorker.join();
+  }
 
 private:
   void registerMenuModule();
@@ -116,6 +156,7 @@ private:
   void loadCurrentSchematic();
   void refreshStatusLine();
   void submitHud();
+  void refreshRenderSnapshot();
   void rebuildMeshAsync();
   void uploadPendingMesh();
   void drawWorldSpace(const pl::render::RenderContext &context);
@@ -155,12 +196,18 @@ private:
   bitematica::gles::SchematicRenderer mRenderer;
   std::vector<bitematica::gles::SectionBuffer> mSectionBuffers;
 
-  // Async meshing.
+  // Async meshing. The worker reads only a `MeshRequest` snapshot, never the live members.
   std::thread mMeshWorker;
   std::atomic<bool> mMeshWorkerStop{false};
+  std::mutex mRequestMutex;
+  MeshRequest mRequest;
+  std::atomic<bool> mMeshRequested{false};
   std::mutex mPendingMutex;
   PendingMesh mPending;
-  std::atomic<bool> mMeshRequested{false};
+
+  // Render-thread snapshot, guarded by `mRenderMutex`.
+  std::mutex mRenderMutex;
+  RenderSnapshot mRenderSnapshot;
 
   // World verification.
   bitematica::mod::GameWorldSource mWorldSource;
@@ -226,6 +273,10 @@ bool BiteMaticaMod::disable() {
 
 bool BiteMaticaMod::unload() {
   mEnabled = false;
+  // A joinable std::thread destroyed while still joinable calls std::terminate, so the worker must
+  // be stopped and joined here too, not only in disable().
+  mMeshWorkerStop.store(true, std::memory_order_release);
+  if (mMeshWorker.joinable()) mMeshWorker.join();
   return true;
 }
 
@@ -324,24 +375,32 @@ bool BiteMaticaMod::handleKey(int keyCode, bool isDown) {
 // --- render --------------------------------------------------------------------------
 
 void BiteMaticaMod::installRenderCallback() {
-  // Start the meshing worker once. It only ever builds meshes; upload and draw stay on the render
-  // thread.
+  // Start the meshing worker if it is not already running. `disable()` joins it, so a re-enable
+  // must clear the stop flag before starting a new one — otherwise the new thread sees the stale
+  // `true` and exits immediately, and nothing ever meshes again.
   if (!mMeshWorker.joinable()) {
+    mMeshWorkerStop.store(false, std::memory_order_release);
     mMeshWorker = std::thread([this] {
       while (!mMeshWorkerStop.load(std::memory_order_acquire)) {
         if (!mMeshRequested.exchange(false, std::memory_order_acq_rel)) {
           std::this_thread::sleep_for(std::chrono::milliseconds(50));
           continue;
         }
-        if (!mHasSchematic) continue;
-        int layerMin = 0;
-        int layerMax = 0;
-        currentLayerRange(layerMin, layerMax);
+        // Take a private copy of everything needed. The live members can be mutated by the touch
+        // and menu callbacks at any moment, so the worker must never touch them directly.
+        MeshRequest request;
+        {
+          std::lock_guard<std::mutex> lock(mRequestMutex);
+          request = mRequest;
+        }
+        if (request.schematic.empty()) continue;
+
         const auto built = bitematica::mesh::SectionMesher::build(
-            mSchematic, mPlacement, layerMin, layerMax, mConfig.maxTriangles);
+            request.schematic, request.placement, request.layerMin, request.layerMax,
+            request.maxTriangles);
         {
           std::lock_guard<std::mutex> lock(mPendingMutex);
-          mPending.sections = built.sections;
+          mPending.sections = std::move(built.sections);
           mPending.emittedQuads = built.emittedQuads;
           mPending.truncated = built.truncated;
           mPending.ready = true;
@@ -357,7 +416,16 @@ void BiteMaticaMod::installRenderCallback() {
 }
 
 void BiteMaticaMod::drawWorldSpace(const pl::render::RenderContext &context) {
-  if (!mHasSchematic || mConfig.renderMode == bitematica::mod::RenderMode::Hidden) return;
+  // Read a private copy: the live members can be mutated by input on another thread mid-frame.
+  RenderSnapshot snapshot;
+  {
+    std::lock_guard<std::mutex> lock(mRenderMutex);
+    snapshot = mRenderSnapshot;
+  }
+  if (!snapshot.hasSchematic ||
+      snapshot.renderMode == static_cast<int>(bitematica::mod::RenderMode::Hidden)) {
+    return;
+  }
 
   // Lazy GL init: the first render frame is the first time we are on the render thread with a
   // context, so this is where the program is compiled.
@@ -390,22 +458,32 @@ void BiteMaticaMod::drawWorldSpace(const pl::render::RenderContext &context) {
     mPlayerPosition = {position[0], position[1], position[2]};
   }
 
-  const auto frustum = bitematica::render::Frustum::fromViewProjection(viewProjection);
-  const bitematica::render::Vec3 origin{static_cast<float>(mPlacement.origin.x),
-                                        static_cast<float>(mPlacement.origin.y + mPlacement.yOffset),
-                                        static_cast<float>(mPlacement.origin.z)};
-  const float yaw = static_cast<float>(static_cast<int>(mPlacement.rotation) * 90);
+  const bitematica::world::Placement &placement = snapshot.placement;
+  const bitematica::render::Vec3 origin{static_cast<float>(placement.origin.x),
+                                        static_cast<float>(placement.origin.y + placement.yOffset),
+                                        static_cast<float>(placement.origin.z)};
+  const float yaw = static_cast<float>(static_cast<int>(placement.rotation) * 90);
+
+  // Cull in placement-local space. Section boxes are axis-aligned there regardless of the
+  // placement's rotation, so a rotated placement's sections are no longer wrongly culled at the
+  // screen edges, and the distance test compares like-for-like (local centre vs local camera).
+  const bitematica::render::Mat4 localToWorld =
+      bitematica::render::placementLocalToWorld(origin, yaw);
+  const bitematica::render::Mat4 localViewProjection =
+      bitematica::render::Mat4::multiply(viewProjection, localToWorld);
+  const auto frustum = bitematica::render::Frustum::fromViewProjection(localViewProjection);
+  const bitematica::render::Vec3 localCamera =
+      bitematica::render::worldToPlacementLocal(origin, yaw, mPlayerPosition);
 
   const bitematica::gles::DrawMode mode =
-      mConfig.verifyAgainstWorld
+      snapshot.verifyAgainstWorld
           ? bitematica::gles::DrawMode::Mismatch
-          : (mConfig.renderMode == bitematica::mod::RenderMode::Skeleton
+          : (snapshot.renderMode == static_cast<int>(bitematica::mod::RenderMode::Skeleton)
                  ? bitematica::gles::DrawMode::Outlines
                  : bitematica::gles::DrawMode::Translucent);
 
-  mRenderer.draw(viewProjection, origin, yaw, mode,
-                 static_cast<float>(mConfig.opacity) / 100.0f, mPlayerPosition,
-                 static_cast<float>(mConfig.renderDistance), frustum, mSectionBuffers);
+  mRenderer.draw(localViewProjection, origin, yaw, mode, snapshot.opacity, localCamera,
+                 snapshot.renderDistance, frustum, mSectionBuffers);
 }
 
 void BiteMaticaMod::uploadPendingMesh() {
@@ -430,7 +508,33 @@ void BiteMaticaMod::uploadPendingMesh() {
   }
 }
 
+void BiteMaticaMod::refreshRenderSnapshot() {
+  // Called after any change the render callback depends on. The callback reads only this copy, so
+  // the placement and config can be mutated by input on another thread without racing the render.
+  std::lock_guard<std::mutex> lock(mRenderMutex);
+  mRenderSnapshot.enabled = mConfig.enabled;
+  mRenderSnapshot.hasSchematic = mHasSchematic;
+  mRenderSnapshot.renderMode = static_cast<int>(mConfig.renderMode);
+  mRenderSnapshot.verifyAgainstWorld = mConfig.verifyAgainstWorld;
+  mRenderSnapshot.opacity = static_cast<float>(mConfig.opacity) / 100.0f;
+  mRenderSnapshot.renderDistance = static_cast<float>(mConfig.renderDistance);
+  mRenderSnapshot.placement = mPlacement;
+}
+
 void BiteMaticaMod::rebuildMeshAsync() {
+  // Snapshot the meshing inputs under the lock, then flag the worker. The worker reads only the
+  // snapshot, so a load/rotate/edit on another thread cannot race it.
+  int layerMin = 0;
+  int layerMax = 0;
+  currentLayerRange(layerMin, layerMax);
+  {
+    std::lock_guard<std::mutex> lock(mRequestMutex);
+    mRequest.schematic = mSchematic;
+    mRequest.placement = mPlacement;
+    mRequest.layerMin = layerMin;
+    mRequest.layerMax = layerMax;
+    mRequest.maxTriangles = mConfig.maxTriangles;
+  }
   mMeshRequested.store(true, std::memory_order_release);
 }
 
@@ -580,6 +684,7 @@ void BiteMaticaMod::loadCurrentSchematic() {
   mLiveMaterials.clear();
   mVerification = bitematica::world::VerifyResult{};
   mConfig.lastLoadedFile = path;
+  refreshRenderSnapshot();
   // Anchor the build at the player, so it appears where they are rather than at the origin.
   moveToPlayer();
   // Keep the legacy software view scale sane too (used for nothing now, but harmless).
@@ -599,6 +704,7 @@ void BiteMaticaMod::moveToPlayer() {
                        static_cast<int>(mPlayerPosition.y),
                        static_cast<int>(mPlayerPosition.z)};
   mPlacement.yOffset = 0;
+  refreshRenderSnapshot();
   setStatus("Placement moved to the player");
 }
 
@@ -737,6 +843,9 @@ void BiteMaticaMod::refreshStatusLine() {
 void BiteMaticaMod::setStatus(const std::string &message) { mStatus = message; }
 
 void BiteMaticaMod::submitHud() {
+  // Every input-driven change funnels through here, so this is where the render thread's copy of
+  // the placement and config is refreshed.
+  refreshRenderSnapshot();
   mButtons = HudOverlay::layoutToolbar(mConfig);
 
   const pl::modmenu::HudSurfaceSize surface = pl::modmenu::getHudSurfaceSize();
