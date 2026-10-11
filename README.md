@@ -51,15 +51,33 @@ It is a *bite-sized Litematica for Bedrock* — rebuilt from the ground up for a
 
 Detection is by **content first**, not the file extension: BiteMatica decompresses the file, reads its NBT, and inspects the root compound to decide what it is holding. A `.litematic` renamed to `.schem` still opens. A file that is not a schematic fails with a specific reason ("schem is missing a Palette compound"), never with a vague "unsupported file".
 
-### Works on every 1.26 build
+### World-space, or nothing
 
-Two things have to hold for world-space rendering, and both are grounded in what the game actually does:
+BiteMatica draws the schematic **in the world**, and only in the world. There is no screen-space
+"software overlay" mode: if the mod cannot draw in world space it draws **nothing** and says why on
+the status line. A schematic projected into 2D is not Litematica, so the mod will not pretend it is.
 
-**A per-frame point on the render thread.** BiteMatica hooks **`eglSwapBuffers`**, which every GLES build calls exactly once per frame with the context current, and whose signature the EGL standard fixes. If the game has not mapped a GLES library when the mod enables, the hook is retried on the next input, so it installs as soon as the game is live.
+Two things have to hold for world-space rendering:
 
-**The camera.** It is built from the **local player feed**, hooked on `ClientInstance`'s own local-player accessor — resolved by RTTI name, with the position and rotation read from the fields at `Actor+0x230` / `+0x238`. Those offsets are shared by **1.26.33, 1.26.50 and 1.26.51**, which is exactly the range this targets. It is the same mechanism the launcher uses for its own in-world features, so it is proven rather than speculative.
+**A per-frame point on the render thread, with the GL context current.** BiteMatica uses the
+preloader's render callback (`pl/Render.hpp`) as the primary seam: it runs on the render thread once
+per frame and hands the mod the game's real camera matrices. If the running preloader predates that
+API, BiteMatica falls back to hooking **`eglSwapBuffers`** (every GLES build calls it once per frame,
+and its signature is fixed by the EGL standard), which is version-independent. If neither is
+available the mod draws nothing and prints `World-space renderer unavailable: no render seam`.
 
-The status line reports the live state — which seam is active, whether the camera feed is live, and how many frames have drawn — so a failure is visible on screen instead of silent.
+**A camera.** With the SDK seam the camera comes from the game's own view/projection matrices. With
+the EGL fallback it comes from the **local player feed**, hooked on `ClientInstance`'s local-player
+accessor — resolved by RTTI name, with position and rotation read from the fields at `Actor+0x230` /
+`+0x238`, the same mechanism the launcher uses for its own in-world features.
+
+The status line always names the mode — `World-space GL (sdk, frame N, X sections, Y tris)` or the
+named failure — so the user is never left guessing whether the schematic is being drawn.
+
+> **Minimum preloader version.** World-space rendering needs the preloader's render API
+> (`pl/Render.hpp`), added in preloader-android commit `167226d`. GlowberryClient must pin a preloader
+> at or after that commit; see [`docs/BUMP_PRELOADER.md`](docs/BUMP_PRELOADER.md). On an older
+> preloader the mod still **loads** (the render symbols are weak) but draws nothing and says so.
 
 ### World-space rendering
 - The schematic is drawn as **real 3D geometry in the world**, not a screen-space projection — so it moves with the world as you walk, and it sits at a real position you can build toward.
@@ -142,7 +160,7 @@ Press **S** (the *Export* button) and the loaded schematic is written to the mod
 | Glyph | Action | What it does |
 | --- | --- | --- |
 | `<` `>` | Previous / next file | Cycles the schematics in the mod's `schematics/` folder |
-| `M` | Render mode | Overlay → Skeleton → Hidden |
+| `M` | Render mode | Translucent → Skeleton → Hidden |
 | `L` | Material list | Shows or hides the block-count panel |
 | `Q` `E` | Rotate left / right | Turns the view 15° (also **L1** / **R1**) |
 | `+` `-` | Zoom in / out | Scales the projection |
@@ -163,7 +181,7 @@ Press **S** (the *Export* button) and the loaded schematic is written to the mod
 | `Tab` | Menu tab | Advances the menu page |
 
 ### Mod Menu integration
-BiteMatica registers a native Mod Menu module with a master toggle and live config: **Render Mode**, **Opacity**, **Layers**, **Material List**, **Ghost Placement**, and **Verify World**. Turning the module off clears the overlay instead of leaving stale geometry on screen.
+BiteMatica registers a native Mod Menu module with a master toggle and live config: **Render Mode**, **Opacity**, **Layers**, **Material List**, **Ghost Placement**, and **Verify World**. Turning the module off stops drawing the schematic instead of leaving stale geometry on screen.
 
 ---
 
@@ -267,8 +285,8 @@ Settings live in `config/config.json` inside the installed mod. The launcher's c
 
 | Key | Meaning |
 | --- | --- |
-| `renderMode` | `0` overlay · `1` skeleton · `2` hidden |
-| `opacity` | overlay alpha in percent (10–100) |
+| `renderMode` | `0` translucent · `1` skeleton · `2` hidden |
+| `opacity` | ghost alpha in percent (10–100) |
 | `onlyExposed` | skip fully enclosed blocks when meshing |
 | `maxRenderBlocks` | per-frame meshing cap (500–250000) |
 | `maxTriangles` | mesher triangle budget (1000–4000000) |
@@ -279,7 +297,7 @@ Settings live in `config/config.json` inside the installed mod. The launcher's c
 | `toolbarX`/`toolbarY` | toolbar anchor in HUD pixels |
 | `materialX`/`materialY` | material-panel anchor in HUD pixels |
 
-A hand-edited value that is out of range is **clamped** on load, so a typo cannot take the overlay off screen.
+A hand-edited value that is out of range is **clamped** on load, so a typo cannot take the toolbar off screen.
 
 ---
 
@@ -308,8 +326,9 @@ bitematica_core   (host-testable, no Android)
 A schematic is normalized into one shape — a palette plus one palette index per block — so the mesher, the verifier and the material list never know or care which dialect it came from.
 
 ### Honest engineering notes
-- **Two drawing paths, deliberately.** World-space geometry is GL (depth-tested, occluded by terrain); the toolbar and material panel are HUD commands (always on top). A toolbar that terrain could occlude would not be a toolbar.
-- **The per-frame render callback is a new public SDK API.** Mods had no way to run code on the render thread with the GL context, so it was added to the preloader (`pl/Render.hpp`) rather than worked around. The mod does not invent a hook it cannot guarantee.
+- **Two drawing paths, deliberately — and only two.** The schematic is world-space GL (depth-tested, occluded by terrain); the toolbar, menu and material panel are HUD commands (always on top). The HUD command vocabulary has **no geometry primitive at all**, so schematic geometry cannot be drawn through it even by mistake. A `test/hud_geometry_guard.sh` check and a unit test enforce this.
+- **No screen-space fallback.** If the world-space renderer is unavailable the mod draws nothing and names the reason on the status line. It never substitutes a 2D projection, because that would not be Litematica.
+- **The per-frame render callback is a public SDK API.** Mods had no way to run code on the render thread with the GL context, so it was added to the preloader (`pl/Render.hpp`) rather than worked around. The mod does not invent a hook it cannot guarantee.
 - **Fail-closed everywhere.** A missing file, a malformed manifest, a truncated archive, an unreadable config, an unresolved camera, an unverified block getter: each becomes a named, user-visible reason in the status line, never a crash and never a guessed value.
 - **The demo that ships is real.** The bundled hut is written by the same encoders the tests use, and it is loaded back through the production reader before packaging.
 

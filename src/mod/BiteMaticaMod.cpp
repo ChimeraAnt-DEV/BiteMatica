@@ -64,7 +64,6 @@
 #include "render/HudOverlay.hpp"
 #include "render/MathTypes.hpp"
 #include "render/PlacementCull.hpp"
-#include "render/ViewCamera.hpp"
 #include "world/CheatPlacement.hpp"
 #include "world/Placement.hpp"
 #include "world/Selection.hpp"
@@ -79,16 +78,14 @@ using bitematica::mod::Config;
 using bitematica::mod::ControllerNavigator;
 using bitematica::render::HudOverlay;
 using bitematica::render::UiCommand;
-using bitematica::render::ViewCamera;
 
-constexpr const char *kModuleId = "bitematica.overlay";
+constexpr const char *kModuleId = "bitematica.mod";
 constexpr const char *kModuleName = "BiteMatica";
 
 /// Draw-command colors the SDK expects are 0xAARRGGBB, matching `UiCommand`.
 pl::modmenu::DrawCommandType toSdkKind(UiCommand::Kind kind) {
   switch (kind) {
     case UiCommand::Kind::Rect: return pl::modmenu::DrawCommandType::RectFilled;
-    case UiCommand::Kind::Triangle: return pl::modmenu::DrawCommandType::TriangleFilled;
     case UiCommand::Kind::Text: return pl::modmenu::DrawCommandType::Text;
   }
   return pl::modmenu::DrawCommandType::RectFilled;
@@ -214,7 +211,6 @@ private:
   /// The player's last known position, refreshed each render frame, for "move to player".
   bitematica::render::Vec3 mPlayerPosition{};
 
-  ViewCamera mCamera;
   std::vector<bitematica::core::MaterialEntry> mMaterials;
   std::vector<bitematica::core::LiveMaterialRow> mLiveMaterials;
   std::vector<bitematica::render::ToolbarButton> mButtons;
@@ -344,15 +340,15 @@ bool BiteMaticaMod::enable() {
   // 1.26.33 / 1.26.50 / 1.26.51, so it is what makes world-space rendering work on those builds.
   bitematica::mod::LocalPlayerFeed::install();
 
-  // Install the per-frame render seam. The EGL hook is the primary path because it is
-  // version-independent; the SDK callback is a fallback. Only when neither is available does the mod
-  // fall back to the software overlay.
+  // Install the per-frame render seam. The SDK render callback is the primary path; the EGL hook is
+  // the fallback. When neither is available the mod draws no schematic and says so on screen — it
+  // never falls back to a screen-space overlay, which is not world-space rendering.
   installRenderCallback();
   if (mSelf != nullptr) {
-    const char *seam = mRenderSeam == RenderSeam::Egl
-                           ? "eglSwapBuffers (version-independent)"
-                           : (mRenderSeam == RenderSeam::Preloader ? "preloader render callback"
-                                                                   : "none (software overlay)");
+    const char *seam = mRenderSeam == RenderSeam::Preloader
+                           ? "preloader render callback"
+                           : (mRenderSeam == RenderSeam::Egl ? "eglSwapBuffers (version-independent)"
+                                                             : "none (no world-space seam)");
     mSelf->getLogger().info("BiteMatica: render seam = {}", seam);
   }
   // Pass the configured slot. A negative value means "not verified for this build", and the source
@@ -524,20 +520,20 @@ void BiteMaticaMod::installRenderCallback() {
 
   // The frame source is chosen at runtime, and both paths end in the same `drawWorldSpace`:
   //
+  //  * The **preloader** path uses the SDK's render callback (`pl/Render.hpp`). It runs on the render
+  //    thread with the GL context current and hands the mod the game's real camera matrices, so it
+  //    is the primary seam whenever the running preloader exports it.
   //  * The **EGL** path hooks `eglSwapBuffers`, which every GLES build calls once per frame. It is
-  //    version-independent, so world-space rendering works on 1.26-1.26.52 and any later build.
-  //  * The **preloader** path uses the SDK's render callback when the running preloader has it
-  //    (a newer launcher); it is a fallback, not the primary seam.
+  //    version-independent and is the fallback for a preloader that predates the render API; the
+  //    camera then comes from the local player feed.
   //
-  // Hooking EGL is what removes the game-build gate: the camera comes from the game's own matrices
-  // (found by GameCamera), not from a per-build player accessor.
-  // The callback is registered once; the EGL hook itself may install now or on a later retry, and
-  // `retryRenderSeam` covers the case where the game had not mapped a GLES library yet.
+  // Neither path is a screen-space overlay: if neither is available, nothing is drawn.
   bitematica::gles::EglFrameSource::setCallback([this] { onRenderFrame(); });
   if (bitematica::mod::SdkRender::available()) {
     bitematica::mod::SdkRender::registerCallback([this](const pl::render::RenderContext &) {
       onRenderFrame();
     });
+    mRenderSeam = RenderSeam::Preloader;
   }
   retryRenderSeam();
 }
@@ -545,11 +541,14 @@ void BiteMaticaMod::installRenderCallback() {
 void BiteMaticaMod::retryRenderSeam() {
   // Called from `enable` and again from every touch/key event, so the EGL hook installs as soon as
   // the game has loaded its GLES library. Idempotent and cheap once it succeeds.
-  if (mRenderSeam == RenderSeam::Egl) return;
-  if (bitematica::gles::EglFrameSource::install()) {
-    mRenderSeam = RenderSeam::Egl;
-  } else if (bitematica::mod::SdkRender::available() && mRenderSeam == RenderSeam::None) {
+  //
+  // The SDK render callback is preferred when present (it carries the game's real camera matrices);
+  // EGL is the fallback seam. A seam already found is never downgraded.
+  if (mRenderSeam != RenderSeam::None) return;
+  if (bitematica::mod::SdkRender::available()) {
     mRenderSeam = RenderSeam::Preloader;
+  } else if (bitematica::gles::EglFrameSource::install()) {
+    mRenderSeam = RenderSeam::Egl;
   }
 }
 
@@ -884,8 +883,6 @@ void BiteMaticaMod::loadCurrentSchematic() {
   refreshRenderSnapshot();
   // Anchor the build at the player, so it appears where they are rather than at the origin.
   moveToPlayer();
-  // Keep the legacy software view scale sane too (used for nothing now, but harmless).
-  mCamera = ViewCamera{};
   saveConfig();
   rebuildMeshAsync();
   refreshStatusLine();
@@ -1137,28 +1134,36 @@ void BiteMaticaMod::refreshStatusLine() {
   const char *mode = mConfig.renderMode == bitematica::mod::RenderMode::Skeleton
                          ? "skeleton"
                          : (mConfig.renderMode == bitematica::mod::RenderMode::Hidden ? "hidden"
-                                                                                     : "overlay");
+                                                                                     : "translucent");
   const char *layer = mConfig.layerMode == bitematica::mod::LayerMode::All
                           ? "all"
                           : (mConfig.layerMode == bitematica::mod::LayerMode::Single ? "layer"
                                                                                      : "range");
-  // The status line carries the live diagnostics: which render seam is active, whether the camera
-  // feed is live, and whether frames are actually being drawn. A silent failure is what made the
-  // earlier builds hard to diagnose, so the numbers are on screen.
-  char cameraState[96];
-  std::snprintf(cameraState, sizeof(cameraState), "%s cam:%s draw:%llu nocam:%llu",
-                worldSpaceActive()
-                    ? (mRenderSeam == RenderSeam::Egl ? "world-space (egl)" : "world-space (sdk)")
-                    : "software overlay",
-                bitematica::mod::LocalPlayerFeed::diagnostic(),
-                mFramesDrawn.load(std::memory_order_relaxed),
-                mFramesWithoutCamera.load(std::memory_order_relaxed));
+  // The status line always names the render mode, so the user is never left guessing whether the
+  // schematic is being drawn in world space. When it is not, the reason is spelled out and nothing
+  // is drawn — there is no screen-space fallback.
+  char renderState[160];
+  if (mRenderSeam == RenderSeam::Preloader) {
+    std::snprintf(renderState, sizeof(renderState),
+                  "World-space GL (sdk, frame %llu, %d sections, %d tris)",
+                  mFramesDrawn.load(std::memory_order_relaxed), mRenderer.lastDrawnSections(),
+                  mRenderer.lastDrawnTriangles());
+  } else if (mRenderSeam == RenderSeam::Egl) {
+    std::snprintf(renderState, sizeof(renderState),
+                  "World-space GL (egl, frame %llu, %d sections, %d tris)",
+                  mFramesDrawn.load(std::memory_order_relaxed), mRenderer.lastDrawnSections(),
+                  mRenderer.lastDrawnTriangles());
+  } else {
+    std::snprintf(renderState, sizeof(renderState),
+                  "World-space renderer unavailable: no render seam - update GlowberryClient");
+  }
 
-  char buffer[320];
-  std::snprintf(buffer, sizeof(buffer), "%s  %dx%dx%d  %s  %s  rot %d  @%d,%d,%d  %s",
+  char buffer[420];
+  std::snprintf(buffer, sizeof(buffer), "%s  %dx%dx%d  %s  %s  rot %d  @%d,%d,%d  %s  cam:%s",
                 schematic().name.c_str(), schematic().sizeX(), schematic().sizeY(),
                 schematic().sizeZ(), mode, layer, static_cast<int>(mPlacement.rotation) * 90,
-                mPlacement.origin.x, mPlacement.origin.y, mPlacement.origin.z, cameraState);
+                mPlacement.origin.x, mPlacement.origin.y, mPlacement.origin.z, renderState,
+                bitematica::mod::LocalPlayerFeed::diagnostic());
   setStatus(buffer);
 }
 
@@ -1171,10 +1176,6 @@ void BiteMaticaMod::submitHud() {
   rebuildMenuPages();
   mButtons = HudOverlay::layoutToolbar(mConfig);
 
-  const pl::modmenu::HudSurfaceSize surface = pl::modmenu::getHudSurfaceSize();
-  mCamera.centerX = surface.width > 0.0f ? surface.width * 0.5f : 640.0f;
-  mCamera.centerY = surface.height > 0.0f ? surface.height * 0.52f : 360.0f;
-
   // The material panel shows the live list when a verification has run, otherwise the static one.
   std::vector<bitematica::core::MaterialEntry> displayMaterials = mMaterials;
   if (!mLiveMaterials.empty()) {
@@ -1185,17 +1186,10 @@ void BiteMaticaMod::submitHud() {
   }
 
   std::string infoLine = mHint.empty() ? mStatus : (mStatus + "   " + mHint);
-  // When the render API is present the schematic is world-space GL geometry and the HUD only draws
-  // the toolbar and panel (`hasSchematic` false). On an older preloader there is no render callback,
-  // so the mod falls back to the software overlay: the schematic is projected and drawn as HUD
-  // commands, exactly as it was before world-space rendering.
-  const bool softwareOverlay = !worldSpaceActive();
-  if (softwareOverlay && mHasSchematic && mConfig.renderMode != bitematica::mod::RenderMode::Hidden) {
-    infoLine += "   [software overlay: update the launcher for world-space]";
-  }
-  std::vector<UiCommand> commands = HudOverlay::buildCommands(
-      schematic(), mConfig, mCamera, mButtons, displayMaterials, infoLine,
-      softwareOverlay && mHasSchematic);
+  // Chrome only. The schematic is never drawn as HUD geometry: when no world-space seam is
+  // available the status line names the reason and nothing is drawn (see refreshStatusLine).
+  std::vector<UiCommand> commands =
+      HudOverlay::buildCommands(mConfig, mButtons, displayMaterials, infoLine, mHasSchematic);
 
   // The floating menu icon is always drawn, so the menu is reachable with a tap and never needs a
   // keyboard or the Mod Menu. It is anchored to the top-left of the screen rather than relative to
@@ -1232,8 +1226,6 @@ void BiteMaticaMod::submitHud() {
     out.y = command.y;
     out.w = command.w;
     out.h = command.h;
-    out.x3 = command.x3;
-    out.y3 = command.y3;
     out.color = command.color;
     out.size = command.size;
     out.text = command.text;

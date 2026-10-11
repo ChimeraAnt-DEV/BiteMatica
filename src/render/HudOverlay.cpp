@@ -113,56 +113,13 @@ uint32_t HudOverlay::applyOpacity(uint32_t argb, int opacityPercent) {
   return (argb & 0x00FFFFFFu) | (static_cast<uint32_t>(scaled) << 24);
 }
 
-std::vector<UiCommand> HudOverlay::buildMeshCommands(const core::Schematic &schematic,
-                                                     const mod::Config &config,
-                                                     const ViewCamera &camera) {
-  std::vector<UiCommand> commands;
-  if (config.renderMode == mod::RenderMode::Hidden || schematic.empty()) return commands;
-
-  const MeshBuilder::Result mesh =
-      MeshBuilder::build(schematic, camera, config.maxRenderBlocks);
-  commands.reserve(mesh.triangles.size() + 32);
-  for (const Triangle &triangle : mesh.triangles) {
-    commands.push_back(UiCommand::makeTriangle(triangle.a, triangle.b, triangle.c,
-                                               applyOpacity(triangle.color, config.opacity)));
-  }
-
-  if (config.renderMode == mod::RenderMode::Skeleton) {
-    // The skeleton draws the box edges over whatever else is present. Emit the eight
-    // corners' projected positions as short line stand-ins (thin rects) so the mode is
-    // visibly different even before a line primitive is available.
-    const core::Bounds &bounds = schematic.bounds;
-    const core::LocalPos corners[8] = {
-        {bounds.min.x, bounds.min.y, bounds.min.z},
-        {bounds.max.x, bounds.min.y, bounds.min.z},
-        {bounds.min.x, bounds.max.y, bounds.min.z},
-        {bounds.max.x, bounds.max.y, bounds.min.z},
-        {bounds.min.x, bounds.min.y, bounds.max.z},
-        {bounds.max.x, bounds.min.y, bounds.max.z},
-        {bounds.min.x, bounds.max.y, bounds.max.z},
-        {bounds.max.x, bounds.max.y, bounds.max.z},
-    };
-    for (const core::LocalPos &corner : corners) {
-      const ScreenPoint p = camera.project(schematic, static_cast<float>(corner.x),
-                                           static_cast<float>(corner.y),
-                                           static_cast<float>(corner.z));
-      commands.push_back(UiCommand::makeRect(p.x - 2.0f, p.y - 2.0f, 4.0f, 4.0f, kAccent));
-    }
-  }
-  return commands;
-}
-
 std::vector<UiCommand> HudOverlay::buildCommands(
-    const core::Schematic &schematic, const mod::Config &config,
-    const ViewCamera &camera, const std::vector<ToolbarButton> &buttons,
+    const mod::Config &config, const std::vector<ToolbarButton> &buttons,
     const std::vector<core::MaterialEntry> &materials, const std::string &statusLine,
-    bool hasSchematic) {
+    bool showMaterials) {
+  // Chrome only: toolbar, status line, material panel. Schematic geometry is deliberately absent —
+  // it is world-space GL geometry, drawn by SchematicRenderer, never HUD draw commands.
   std::vector<UiCommand> commands;
-
-  if (hasSchematic) {
-    std::vector<UiCommand> mesh = buildMeshCommands(schematic, config, camera);
-    commands.insert(commands.end(), mesh.begin(), mesh.end());
-  }
 
   if (config.showToolbar) {
     // Panel behind the grid.
@@ -197,7 +154,7 @@ std::vector<UiCommand> HudOverlay::buildCommands(
     }
   }
 
-  if (config.showMaterialList && hasSchematic) {
+  if (config.showMaterialList && showMaterials) {
     const int shown = std::min<int>(static_cast<int>(materials.size()), 16);
     const float panelWidth = 220.0f;
     const float rowHeight = 16.0f;
