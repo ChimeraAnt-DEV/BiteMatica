@@ -32,6 +32,7 @@ SOURCES=(
   src/mod/GameWorldSource.cpp
   src/gles/Gles.cpp
   src/gles/SchematicRenderer.cpp
+  src/gles/EglFrameSource.cpp
 )
 CORE_SOURCES=(
   src/nbt/NbtReader.cpp src/nbt/NbtWriter.cpp
@@ -43,6 +44,9 @@ CORE_SOURCES=(
   src/world/CheatPlacement.cpp
   src/translate/BlockTranslation.cpp
   src/core/LiveMaterials.cpp
+  src/litematica/PasteJob.cpp src/litematica/EasyPlace.cpp
+  src/render/GameCamera.cpp
+  src/ui/MenuBuilder.cpp
   src/render/HudOverlay.cpp
   src/mod/ControllerNavigator.cpp src/mod/JsonConfig.cpp
 )
