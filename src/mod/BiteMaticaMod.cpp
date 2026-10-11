@@ -789,6 +789,8 @@ void BiteMaticaMod::drawWorldSpace(const bitematica::render::CameraFrame &camera
   options.outlines = snapshot.showOutlines;
   options.outlineWidth = snapshot.outlineWidth;
   options.mismatchMode = snapshot.mismatchMode;
+  // The palette preset (C6/J9) selects the mismatch colours; the shader receives them as a uniform.
+  options.palette = bitematica::world::MismatchPalette::preset(mConfig.palettePreset);
 
   mRenderer.draw(cull.mvp, cull.cameraRelativeOrigin, yaw, options, cull.localCamera, cull.frustum,
                  mSectionBuffers, mOutlineBuffers);
@@ -837,7 +839,9 @@ void BiteMaticaMod::refreshRenderSnapshot() {
   // Called after any change the render callback depends on. The callback reads only this copy, so
   // the placement and config can be mutated by input on another thread without racing the render.
   std::lock_guard<std::mutex> lock(mRenderMutex);
-  mRenderSnapshot.enabled = mConfig.enabled;
+  // The panic toggle (J6) disables drawing instantly without unloading: it gates the same flag the
+  // render callback checks first, so nothing is drawn and no GL work happens until it is turned off.
+  mRenderSnapshot.enabled = mConfig.enabled && !mConfig.panicHidden;
   mRenderSnapshot.hasSchematic = mHasSchematic;
   mRenderSnapshot.renderMode = static_cast<int>(mConfig.renderMode);
   mRenderSnapshot.verifyAgainstWorld = mConfig.verifyAgainstWorld;
@@ -1012,6 +1016,15 @@ bool BiteMaticaMod::performAction(bitematica::render::ToolbarButton::Action acti
       return true;
     case Action::CycleMenuTab:
       mMenuTab = (mMenuTab + 1) % bitematica::ui::kMenuTabCount;
+      submitHud();
+      return true;
+    case Action::PanicToggle:
+      // J6: instant hide/show without unloading. The snapshot's enabled flag gates the render
+      // callback, so nothing is drawn (and no GL work happens) while it is on.
+      mConfig.panicHidden = !mConfig.panicHidden;
+      saveConfig();
+      refreshRenderSnapshot();
+      refreshStatusLine();
       submitHud();
       return true;
     case Action::Reload:
