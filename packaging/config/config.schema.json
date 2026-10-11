@@ -51,6 +51,40 @@
       "minimum": 500,
       "maximum": 250000
     },
+    "maxTriangles": {
+      "title": "Triangle Budget",
+      "description": "Meshing stops and reports truncation past this many triangles.",
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 4000000
+    },
+    "renderDistance": {
+      "title": "Render Distance",
+      "description": "Sections beyond this many blocks are not drawn; 0 disables distance culling.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1024
+    },
+    "layerMode": {
+      "title": "Layer Mode",
+      "description": "0 all layers, 1 a single layer, 2 a range.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2
+    },
+    "layerSingle": { "title": "Single Layer", "type": "integer", "minimum": 0 },
+    "layerMin": { "title": "Range Start", "type": "integer", "minimum": 0 },
+    "layerMax": { "title": "Range End", "type": "integer", "minimum": 0 },
+    "verifyAgainstWorld": {
+      "title": "Verify Against World",
+      "description": "Colour blocks by whether the live world matches the schematic.",
+      "type": "boolean"
+    },
+    "verifyExtras": {
+      "title": "Report Extra Blocks",
+      "description": "Also flag world blocks sitting where the schematic wants air.",
+      "type": "boolean"
+    },
     "toolbarX": { "title": "Toolbar X", "type": "integer", "minimum": 0 },
     "toolbarY": { "title": "Toolbar Y", "type": "integer", "minimum": 0 },
     "materialX": { "title": "Material Panel X", "type": "integer", "minimum": 0 },

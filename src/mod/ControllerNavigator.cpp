@@ -20,6 +20,13 @@ const char *ControllerNavigator::actionName(render::ToolbarButton::Action action
     case Action::ExportStructure: return "Export .mcstructure";
     case Action::ToggleMaterials: return "Material list";
     case Action::Reload: return "Reload";
+    case Action::Verify: return "Verify against world";
+    case Action::CycleLayers: return "Layer mode";
+    case Action::MoveToPlayer: return "Move to player";
+    case Action::RotatePlacement: return "Rotate placement";
+    case Action::CycleMirror: return "Mirror placement";
+    case Action::ExportCsv: return "Export material CSV";
+    case Action::SaveLitematic: return "Save .litematic";
   }
   return "Action";
 }
@@ -88,6 +95,10 @@ render::ToolbarButton::Action ControllerNavigator::actionForIndex(int index) {
       Action::ToggleMaterials, Action::RotateLeft, Action::RotateRight,
       Action::ZoomIn,       Action::ZoomOut,     Action::NudgeUp,
       Action::NudgeDown,    Action::ToggleGhost, Action::ExportStructure,
+      Action::Verify,       Action::CycleLayers, Action::MoveToPlayer,
+      Action::RotatePlacement, Action::CycleMirror, Action::ExportCsv,
+      Action::SaveLitematic, Action::Reload, Action::ZoomIn,
+      Action::ZoomOut, Action::NudgeUp, Action::NudgeDown,
   };
   const int count = static_cast<int>(sizeof(order) / sizeof(order[0]));
   if (index < 0) index = 0;

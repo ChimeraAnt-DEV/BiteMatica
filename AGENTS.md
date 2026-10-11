@@ -8,16 +8,32 @@ Litematica/malilib code, and it does not run Java Edition mods.
 ## Layout
 
 ```text
-src/nbt/      NBT decode/encode (gzip + zlib + raw), zlib-backed inflate
-src/format/   format readers (litematic/schem/schematic/nbt) + StructureWriter
-src/core/     Schematic, BlockPalette, MaterialList, BlockPos
-src/render/   ViewCamera (isometric projector), MeshBuilder, BlockColors, HudOverlay
-src/mod/      Config, JsonConfig, SchematicLibrary, ControllerNavigator, BiteMaticaMod
-test/         host test suite + fixture generator
-tools/        pack_antegg.py, generate_demo.py, generate_icon.py
-packaging/    egg.json, default config + schema
-assets/       demo schematic, generated icon
+src/nbt/        NBT decode/encode (gzip + zlib + raw), zlib-backed inflate
+src/format/     format readers + StructureWriter (.mcstructure) + LitematicWriter
+src/core/       Schematic, BlockPalette, MaterialList, LiveMaterials, BlockPos
+src/mesh/       SectionMesher (16^3 sections, exposed-face cull, greedy merge)
+src/world/      Placement, Verifier, WorldSource, Selection, CheatPlacement
+src/translate/  BlockTranslation (Java -> Bedrock block states)
+src/render/     MathTypes (matrices/frustum), HudOverlay (2D toolbar), ViewCamera (legacy)
+src/gles/       Gles (runtime-resolved entry points), SchematicRenderer (GL state save/restore)
+src/mod/        Config, JsonConfig, SchematicLibrary, ControllerNavigator,
+                GameWorldSource, BiteMaticaMod (preloader glue)
+test/           host test suites + fixture generator
+tools/          pack_antegg.py, generate_demo.py, generate_icon.py
+packaging/      egg.json, manifest.json, default config + schema
+assets/         demo schematic, generated icon
 ```
+
+## Two drawing paths (do not mix them)
+
+World-space geometry goes through **GL** via the preloader's `pl/Render.hpp` per-frame callback
+(render thread, GL context current), and is depth-tested so terrain occludes it. The toolbar and
+material panel go through **Mod Menu HUD draw commands** and are always on top. A toolbar that
+terrain could occlude is not a toolbar, so the two must stay separate.
+
+The mod's own matrix type (`render::Mat4`) is deliberately separate from the SDK's
+(`pl::cosmetics::Mat4`) so the host tests never pull in the preloader; the two are converted at the
+single boundary in `BiteMaticaMod.cpp` (`toSdkMatrix`).
 
 ## Build
 
@@ -36,18 +52,20 @@ change it there, not in the scripts.
 
 ## Test
 
-The whole format/mesh/UI stack is Android-free and builds on a host:
+The whole format/mesh/world/UI stack is Android-free and builds on a host:
 
 ```bash
 python3 test/make_fixtures.py test/fixtures
 cmake -S . -B build/host -DCMAKE_BUILD_TYPE=Release
-cmake --build build/host --target bitematica_tests
-./build/host/bitematica_tests
+cmake --build build/host --target bitematica_tests bitematica_world_tests
+./build/host/bitematica_tests        # 85 checks: formats, projector, toolbar, controller, config
+./build/host/bitematica_world_tests  # 64 checks: placement, mesher, verification, translation
 ```
 
-The suite reads **generated real schematic files** through the production readers. Do not
-replace a fixture read with a mock; the point of the suite is that the readers accept
-genuine wire formats.
+The suites read **generated real schematic files** through the production readers. Do not
+replace a fixture read with a mock; the point is that the readers accept genuine wire formats.
+The world suite uses a `FakeWorld : WorldSource` for the verification cases — that is a real
+implementation of the interface, not a mock of the code under test.
 
 Without CMake available, the same targets compile directly:
 `g++ -std=c++20 -I src test/host_tests.cpp src/nbt/*.cpp src/format/*.cpp
@@ -71,10 +89,18 @@ src/render/HudOverlay.cpp src/mod/ControllerNavigator.cpp src/mod/JsonConfig.cpp
   has no exposed face and is skipped. The mesh test pins 26.
 - **The toolbar and the controller navigator share one button order.** `HudOverlay`'s
   `kButtons` array and `ControllerNavigator::actionForIndex`'s `order[]` must stay in the
-  same sequence; `host_tests.cpp` walks every index and compares them.
-- **There is no per-frame callback in the preloader SDK.** The overlay's draw commands are
-  submitted on load, on toggle, and on input; they then stay static while the launcher
-  redraws them. Do not invent a frame hook.
+  same sequence (19 buttons, 6 columns); `host_tests.cpp` walks every index and compares them.
+  Adding a toolbar button means updating the count assertions in both suites.
+- **The per-frame render callback lives in the SDK (`pl/Render.hpp`), not the mod.** It runs on
+  the render thread with the GL context current and is dispatched from the player-render detour.
+  Do not add a second hook; register through `pl::render::RegisterRenderCallback`.
+- **Meshing must not run on the render thread.** `BiteMaticaMod` builds meshes on a worker and
+  hands finished `SectionMesh`es to the render thread through a mutex-guarded slot; the render
+  callback only uploads buffers and draws.
+- **GL state save/restore is exhaustive on purpose.** `SchematicRenderer::saveState`/`restoreState`
+  cover program, VAO, both buffer bindings, the texture binding, blend, depth test, cull, depth
+  mask, depth func, cull mode, front face and blend factors, and `restoreState` runs even when no
+  section is drawn. A stale binding left behind corrupts the game's next draw.
 - **The package must contain its `egg.json` entry point.** `pack_antegg.py` refuses to run
   when `egg.json`'s `entry_point` and `--entry` disagree; the loader would reject it later.
 

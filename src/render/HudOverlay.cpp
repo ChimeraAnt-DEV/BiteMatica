@@ -31,6 +31,11 @@ const ButtonSpec kButtons[] = {
     {Action::ZoomIn, "+"},       {Action::ZoomOut, "-"},
     {Action::NudgeUp, "^"},      {Action::NudgeDown, "v"},
     {Action::ToggleGhost, "G"},  {Action::ExportStructure, "S"},
+    // World-space controls.
+    {Action::Verify, "V"},        {Action::CycleLayers, "Y"},
+    {Action::MoveToPlayer, "P"},  {Action::RotatePlacement, "R"},
+    {Action::CycleMirror, "X"},   {Action::ExportCsv, "C"},
+    {Action::SaveLitematic, "W"},
 };
 
 constexpr int kColumns = 6;
@@ -73,6 +78,12 @@ std::vector<ToolbarButton> HudOverlay::layoutToolbar(const mod::Config &config) 
         break;
       case Action::CycleMode:
         button.active = config.renderMode != mod::RenderMode::Hidden;
+        break;
+      case Action::Verify:
+        button.active = config.verifyAgainstWorld;
+        break;
+      case Action::CycleLayers:
+        button.active = config.layerMode != mod::LayerMode::All;
         break;
       default:
         break;
