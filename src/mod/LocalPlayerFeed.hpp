@@ -41,14 +41,19 @@ public:
   static std::uintptr_t positionOffset();
   static std::uintptr_t rotationOffset();
 
-  /// Builds a world->clip matrix from the live player when no real camera is available.
+  /// Builds the camera from the live player when no real camera is available.
   ///
   /// This is the reliable fallback: the eye is the player's head and the view direction comes from
   /// the player's own yaw/pitch, so it is correct in first person and close in third. It needs only
   /// the feed above, not any SDK matrix API, so it works on every build the feed works on.
+  ///
+  /// `outView` and `outProjection` are provided separately as well as combined, because the renderer
+  /// needs them apart to build the camera-relative clip matrix that stays exact at world coordinate
+  /// ±3e7 (see `render::cameraRelativeViewProjection`).
   static bool buildLocalCamera(float fovDegrees, float aspectRatio, float nearPlane, float farPlane,
                                render::Mat4 &outViewProjection, render::Vec3 &outEye,
-                               render::Vec3 &outForward);
+                               render::Vec3 &outForward, render::Mat4 &outView,
+                               render::Mat4 &outProjection);
 };
 
 } // namespace bitematica::mod

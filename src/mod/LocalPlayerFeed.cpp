@@ -183,7 +183,8 @@ const char *LocalPlayerFeed::diagnostic() {
 
 bool LocalPlayerFeed::buildLocalCamera(float fovDegrees, float aspectRatio, float nearPlane,
                                        float farPlane, render::Mat4 &outViewProjection,
-                                       render::Vec3 &outEye, render::Vec3 &outForward) {
+                                       render::Vec3 &outEye, render::Vec3 &outForward,
+                                       render::Mat4 &outView, render::Mat4 &outProjection) {
   float position[3];
   float rotation[2];
   if (!readSnapshot(position, rotation)) return false;
@@ -198,10 +199,9 @@ bool LocalPlayerFeed::buildLocalCamera(float fovDegrees, float aspectRatio, floa
   // The eye sits at the player's feet plus eye height, the same offset Bedrock uses.
   outEye = render::Vec3{position[0], position[1] + 1.62f, position[2]};
 
-  const render::Mat4 view = render::lookAt(outEye, outForward, render::Vec3{0.0f, 1.0f, 0.0f});
-  const render::Mat4 projection =
-      render::perspective(fovDegrees, aspectRatio, nearPlane, farPlane);
-  outViewProjection = render::Mat4::multiply(projection, view);
+  outView = render::lookAt(outEye, outForward, render::Vec3{0.0f, 1.0f, 0.0f});
+  outProjection = render::perspective(fovDegrees, aspectRatio, nearPlane, farPlane);
+  outViewProjection = render::Mat4::multiply(outProjection, outView);
   return outViewProjection.isFinite();
 }
 

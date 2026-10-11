@@ -55,6 +55,15 @@ struct Config {
   int layerMin = 0;
   int layerMax = 255;
 
+  /// Draw block-edge outlines over the ghost (Phase B8).
+  bool showOutlines = true;
+  /// Outline line width in pixels (the driver clamps it).
+  float outlineWidth = 1.5f;
+  /// Polygon offset for the filled ghost faces, to stop z-fighting with real block faces. Negative
+  /// pulls the ghost toward the camera. Configurable (Phase B7).
+  float polygonOffsetFactor = -1.0f;
+  float polygonOffsetUnits = -1.0f;
+
   /// Verification (item 9): colour missing/wrong/extra blocks instead of the schematic's own colour.
   bool verifyAgainstWorld = false;
   /// Whether to also scan air cells for stray world blocks (the "extra" status).
@@ -112,6 +121,12 @@ struct Config {
     if (layerSingle < 0) layerSingle = 0;
     if (layerMin < 0) layerMin = 0;
     if (layerMax < layerMin) layerMax = layerMin;
+    if (outlineWidth < 0.5f) outlineWidth = 0.5f;
+    if (outlineWidth > 8.0f) outlineWidth = 8.0f;
+    if (polygonOffsetFactor < -8.0f) polygonOffsetFactor = -8.0f;
+    if (polygonOffsetFactor > 0.0f) polygonOffsetFactor = 0.0f;
+    if (polygonOffsetUnits < -16.0f) polygonOffsetUnits = -16.0f;
+    if (polygonOffsetUnits > 0.0f) polygonOffsetUnits = 0.0f;
     // A slot of 0 or below means "unverified"; anything above the vtable's plausible size is
     // nonsense and is treated the same way.
     if (verifyBlockSourceSlot < 0 || verifyBlockSourceSlot > 512) verifyBlockSourceSlot = -1;

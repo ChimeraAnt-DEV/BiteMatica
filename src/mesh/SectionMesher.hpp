@@ -80,6 +80,37 @@ public:
   static SectionMesh buildSection(const core::Schematic &schematic,
                                   const world::Placement &placement, int sectionX, int sectionY,
                                   int sectionZ, int layerMin, int layerMax);
+
+  /// One section's block-edge outline: line-segment vertices plus index pairs (two per segment).
+  struct SectionOutline {
+    int sectionX{};
+    int sectionY{};
+    int sectionZ{};
+    float originX{};
+    float originY{};
+    float originZ{};
+    std::vector<MeshVertex> vertices;
+    /// Each entry is a segment (a, b, unused).
+    std::vector<MeshTriangle> segments;
+    bool empty() const { return segments.empty(); }
+  };
+
+  struct OutlineResult {
+    std::vector<SectionOutline> sections;
+    long long emittedEdges{};
+    bool truncated{};
+  };
+
+  /// Builds the block-edge outlines (Phase B8): for each exposed block, its 12 cube edges,
+  /// de-duplicated against neighbouring blocks within the section, as `GL_LINES` segments. This is
+  /// not triangle edges — it is the box edge of each block, which is what reads as a Litematica
+  /// outline. Respects the same layer filter and triangle/line budget.
+  ///
+  /// @param color the outline RGBA (packed 0xAARRGGBB)
+  /// @param maxSegments budget; stops and sets `truncated` when exceeded
+  static OutlineResult buildOutlines(const core::Schematic &schematic,
+                                     const world::Placement &placement, int layerMin, int layerMax,
+                                     uint32_t color, long long maxSegments = 200000);
 };
 
 } // namespace bitematica::mesh
