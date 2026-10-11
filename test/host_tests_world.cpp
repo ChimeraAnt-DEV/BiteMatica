@@ -48,7 +48,11 @@ std::string fixture(const std::string &name) {
 class FakeWorld : public bitematica::world::WorldSource {
 public:
   void set(const bitematica::core::BlockPos &pos, const std::string &name) {
-    mBlocks[key(pos)] = name;
+    set(pos, name, {});
+  }
+  void set(const bitematica::core::BlockPos &pos, const std::string &name,
+           const std::vector<std::pair<std::string, std::string>> &states) {
+    mBlocks[key(pos)] = bitematica::core::BlockState{name, states};
   }
   bool readBlock(const bitematica::core::BlockPos &position,
                  bitematica::core::BlockState &out) override {
@@ -57,8 +61,7 @@ public:
       out = bitematica::core::BlockState{};
       return true; // air
     }
-    out.name = it->second;
-    out.states.clear();
+    out = it->second;
     return true;
   }
   bool available() const override { return mAvailable; }
@@ -68,7 +71,7 @@ private:
   static std::string key(const bitematica::core::BlockPos &p) {
     return std::to_string(p.x) + "," + std::to_string(p.y) + "," + std::to_string(p.z);
   }
-  std::unordered_map<std::string, std::string> mBlocks;
+  std::unordered_map<std::string, bitematica::core::BlockState> mBlocks;
   bool mAvailable{true};
 };
 
@@ -448,10 +451,81 @@ void testVerification() {
   const auto result = bitematica::world::Verifier::verify(s, placement, world, 0, s.sizeY() - 1);
   check(result.available, "verification ran");
   check(result.missing == 1, "one missing block, got " + std::to_string(result.missing));
-  check(result.wrong == 1, "one wrong block, got " + std::to_string(result.wrong));
+  check(result.wrongBlock == 1, "one wrong block, got " + std::to_string(result.wrongBlock));
+  check(result.wrongState == 0, "no wrong-state blocks");
   check(result.correct == 25, "25 correct blocks, got " + std::to_string(result.correct));
   check(result.percentComplete() == 92, "percent complete is 92, got " +
                                             std::to_string(result.percentComplete()));
+}
+
+/// A block of the right type with the wrong state must be `WrongState`, distinct from `WrongBlock`,
+/// and a wrong type must be `WrongBlock`. This is the C6/verdict split the palette colours apart.
+void testVerificationWrongStateVsWrongBlock() {
+  std::printf("testVerificationWrongStateVsWrongBlock\n");
+  bitematica::core::Schematic s;
+  s.palette.intern(bitematica::core::BlockState{}); // 0 air
+  bitematica::core::BlockState stairs;
+  stairs.name = "minecraft:oak_stairs";
+  stairs.states = {{"facing", "north"}};
+  s.palette.intern(stairs); // 1
+  s.bounds.min = {0, 0, 0};
+  s.bounds.max = {1, 0, 0};
+  s.blocks = {1, 1};
+
+  bitematica::world::Placement placement;
+  placement.origin = {0, 0, 0};
+  FakeWorld world;
+  // (0,0,0): right type, wrong facing -> WrongState.
+  world.set({0, 0, 0}, "minecraft:oak_stairs", {{"facing", "south"}});
+  // (1,0,0): wrong type entirely -> WrongBlock.
+  world.set({1, 0, 0}, "minecraft:stone");
+
+  const auto result = bitematica::world::Verifier::verify(s, placement, world, 0, 0);
+  check(result.available, "verification ran");
+  check(result.wrongState == 1, "one wrong-state block, got " + std::to_string(result.wrongState));
+  check(result.wrongBlock == 1, "one wrong-block, got " + std::to_string(result.wrongBlock));
+  check(result.wrong() == 2, "wrong() sums wrong block and wrong state");
+}
+
+/// An unreadable block is `Unknown`, never `Missing`. This is the "chunk not loaded is not a hole"
+/// rule (F4): a source that is available but cannot read a particular position (an unloaded chunk)
+/// must not be reported as a block the player still has to place.
+void testVerificationUnknownNotMissing() {
+  std::printf("testVerificationUnknownNotMissing\n");
+  // A source that is available, but reports "cannot read" for one specific position.
+  class PartiallyUnreadable : public bitematica::world::WorldSource {
+  public:
+    bool readBlock(const bitematica::core::BlockPos &position,
+                   bitematica::core::BlockState &out) override {
+      if (position == unreadable) return false; // unloaded chunk
+      out = bitematica::core::BlockState{};
+      return true; // air
+    }
+    bool available() const override { return true; }
+    bitematica::core::BlockPos unreadable{5, 0, 0};
+  };
+
+  bitematica::core::Schematic s;
+  s.palette.intern(bitematica::core::BlockState{});
+  bitematica::core::BlockState stone;
+  stone.name = "minecraft:stone";
+  s.palette.intern(stone);
+  s.bounds.min = {0, 0, 0};
+  s.bounds.max = {1, 0, 0};
+  s.blocks = {1, 1};
+
+  bitematica::world::Placement placement;
+  placement.origin = {0, 0, 0};
+  PartiallyUnreadable world;
+  // With origin 0, local (0,0,0) and (1,0,0) map to world (0,0,0) and (1,0,0). Make the second one
+  // unreadable: the first is a readable air block (Missing), the second must be Unknown.
+  world.unreadable = {1, 0, 0};
+  const auto result = bitematica::world::Verifier::verify(s, placement, world, 0, 0);
+  check(result.missing == 1, "one readable-missing block, got " + std::to_string(result.missing));
+  check(result.unknown == 1, "an unreadable block is Unknown, got " +
+                                 std::to_string(result.unknown));
+  check(result.missing + result.unknown == 2, "every block is accounted for");
+  check(result.percentComplete() == 0, "an unreadable block is not counted as checked");
 }
 
 void testVerificationUnavailable() {
@@ -649,6 +723,8 @@ int main() {
   testLocalCameraMath();
   testLooksWorldSpace();
   testVerification();
+  testVerificationWrongStateVsWrongBlock();
+  testVerificationUnknownNotMissing();
   testVerificationUnavailable();
   testVerificationExtras();
   testBlockTranslation();

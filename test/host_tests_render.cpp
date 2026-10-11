@@ -14,13 +14,16 @@
 #include <string>
 #include <vector>
 
+#include "core/BlockShape.hpp"
 #include "core/Schematic.hpp"
 #include "format/SchematicFormat.hpp"
 #include "gles/Gles.hpp"
 #include "mesh/SectionMesher.hpp"
+#include "render/BlockColors.hpp"
 #include "render/MathTypes.hpp"
 #include "render/PlacementCull.hpp"
 #include "world/Placement.hpp"
+#include "world/Verifier.hpp"
 
 namespace {
 
@@ -232,6 +235,137 @@ void testOutlineEmptyForAirOnly() {
   check(outline.sections.empty(), "an air-only schematic has no outline");
 }
 
+// --- block shapes (C3/C4) -----------------------------------------------------------
+
+void testBlockShapeTable() {
+  std::printf("testBlockShapeTable\n");
+  using bitematica::core::BlockShape;
+  using bitematica::core::BlockState;
+
+  // A plain stone block is a full cube.
+  BlockState stone;
+  stone.name = "minecraft:stone";
+  check(BlockShape::isCube(stone), "stone is a full cube");
+  check(BlockShape::boxesFor(stone).size() == 1, "a cube is one box");
+
+  // A bottom slab is half height; a top slab is the upper half.
+  BlockState slabBottom;
+  slabBottom.name = "minecraft:oak_slab";
+  check(!BlockShape::isCube(slabBottom), "a slab is not a full cube");
+  check(BlockShape::boxesFor(slabBottom)[0].maxY == 0.5f, "a bottom slab is half height");
+  BlockState slabTop;
+  slabTop.name = "minecraft:oak_slab";
+  slabTop.states = {{"top_slot_bit", "1"}};
+  check(BlockShape::boxesFor(slabTop)[0].minY == 0.5f, "a top slab starts at half height");
+
+  // Stairs are two boxes, and the upper step moves with the facing.
+  BlockState stairs;
+  stairs.name = "minecraft:oak_stairs";
+  stairs.states = {{"weirdo_direction", "2"}}; // south
+  const auto stairBoxes = BlockShape::boxesFor(stairs);
+  check(stairBoxes.size() == 2, "stairs are two boxes");
+  check(stairBoxes[1].minZ == 0.5f, "a south-facing stair's step is on the +Z side");
+
+  // A carpet is a thin plate; a pressure plate is thin; a fence is a post plus arms.
+  BlockState carpet;
+  carpet.name = "minecraft:white_carpet";
+  check(BlockShape::boxesFor(carpet)[0].maxY <= 0.07f, "a carpet is a thin plate");
+  BlockState fence;
+  fence.name = "minecraft:oak_fence";
+  check(BlockShape::boxesFor(fence).size() == 1, "a bare fence is just a post");
+  BlockState fenceLinked;
+  fenceLinked.name = "minecraft:oak_fence";
+  fenceLinked.states = {{"north", "1"}};
+  check(BlockShape::boxesFor(fenceLinked).size() > 1, "a connected fence grows an arm");
+
+  // Fluids are slightly lower unless they are a source.
+  BlockState water;
+  water.name = "minecraft:water";
+  water.states = {{"liquid_depth", "0"}};
+  check(BlockShape::boxesFor(water)[0].maxY == 1.0f, "a water source is full height");
+  BlockState flowing;
+  flowing.name = "minecraft:water";
+  flowing.states = {{"liquid_depth", "4"}};
+  check(BlockShape::boxesFor(flowing)[0].maxY < 1.0f, "flowing water is lower than a source");
+
+  // Never-render blocks.
+  BlockState air;
+  check(BlockShape::neverRenders(air), "air never renders");
+  BlockState structureVoid;
+  structureVoid.name = "minecraft:structure_void";
+  check(BlockShape::neverRenders(structureVoid), "structure void never renders");
+  BlockState barrier;
+  barrier.name = "minecraft:barrier";
+  check(BlockShape::neverRenders(barrier), "barrier is hidden by default");
+  check(!BlockShape::neverRenders(barrier, true), "barrier renders when the toggle is on");
+}
+
+// --- block colours (C1) -------------------------------------------------------------
+
+void testBlockColorTableAndFallback() {
+  std::printf("testBlockColorTableAndFallback\n");
+  using bitematica::render::BlockColors;
+
+  // A known block has an explicit colour.
+  check(BlockColors::hasColor("minecraft:stone"), "stone has an explicit colour");
+  const auto stone = BlockColors::forBlock("minecraft:stone");
+  check(((stone.argb >> 24) & 0xff) == 0xff, "a table colour is opaque");
+
+  // An unknown block gets a deterministic, non-air colour and is recorded (never fabricated
+  // silently).
+  BlockColors::clearUnknowns();
+  const auto unknown1 = BlockColors::forBlock("minecraft:some_modded_block_xyz");
+  const auto unknown2 = BlockColors::forBlock("minecraft:some_modded_block_xyz");
+  check(unknown1.argb == unknown2.argb, "the fallback colour is deterministic");
+  check(!BlockColors::hasColor("minecraft:some_modded_block_xyz"),
+        "the unknown block is not in the table");
+  const auto unknowns = BlockColors::unknownBlocks();
+  bool recorded = false;
+  for (const auto &name : unknowns) {
+    if (name == "some_modded_block_xyz") recorded = true;
+  }
+  check(recorded, "the unknown block is recorded for the status line");
+
+  // Loading a JSON table overrides an entry and adds a new one.
+  const int merged = BlockColors::loadJson(R"({"minecraft:stone":[1,2,3],"minecraft:new_thing":"#0a0b0c"})");
+  check(merged == 2, "two entries merged from JSON, got " + std::to_string(merged));
+  const auto overridden = BlockColors::forBlock("minecraft:stone");
+  check(((overridden.argb >> 16) & 0xff) == 1 && ((overridden.argb >> 8) & 0xff) == 2 &&
+            (overridden.argb & 0xff) == 3,
+        "the JSON entry overrode the default");
+  check(BlockColors::hasColor("minecraft:new_thing"), "the hex entry was added");
+
+  // A malformed entry is skipped, not fatal.
+  const int bad = BlockColors::loadJson(R"({"a":[1,2],"b":"nope","c":[4,5,6]})");
+  check(bad == 1, "only the well-formed entry merged, got " + std::to_string(bad));
+}
+
+// --- mismatch palette (C6) ----------------------------------------------------------
+
+void testMismatchPalettePresets() {
+  std::printf("testMismatchPalettePresets\n");
+  using bitematica::world::MismatchPalette;
+
+  const auto def = MismatchPalette::preset(0);
+  const auto cb = MismatchPalette::preset(1);
+  const auto hc = MismatchPalette::preset(2);
+
+  // The five verdict colours must be distinct within each preset, or the palette fails its job.
+  auto distinct = [](const MismatchPalette &p) {
+    return p.correct != p.missing && p.missing != p.wrongBlock &&
+           p.wrongBlock != p.wrongState && p.wrongState != p.extra;
+  };
+  check(distinct(def), "default palette verdicts are distinct");
+  check(distinct(cb), "colour-blind palette verdicts are distinct");
+  check(distinct(hc), "high-contrast palette verdicts are distinct");
+
+  // The default is Litematica-like: missing is blue-ish, wrong block is red-ish.
+  check(((def.missing) & 0xff) > ((def.missing >> 16) & 0xff), "default missing is blue-dominant");
+  check(((def.wrongBlock >> 16) & 0xff) > (def.wrongBlock & 0xff),
+        "default wrong-block is red-dominant");
+  check(MismatchPalette::preset(99).correct == def.correct, "an unknown index falls back to default");
+}
+
 // --- render plan (M3) ---------------------------------------------------------------
 
 void testRenderPlanSectionSelection() {
@@ -282,6 +416,9 @@ int main() {
   testGlesVersionGate();
   testOutlineIsSurfaceOnly();
   testOutlineEmptyForAirOnly();
+  testBlockShapeTable();
+  testBlockColorTableAndFallback();
+  testMismatchPalettePresets();
   testRenderPlanSectionSelection();
   std::printf("============================\n");
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
