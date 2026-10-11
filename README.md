@@ -89,7 +89,9 @@ BiteMatica implements Litematica's tool model, adapted for touch and controller:
 | **Rebuild / Verify** | Scan the world against the schematic and highlight mismatches |
 | **Pick Block** | Read the schematic block under the crosshair |
 
-**Full menu system** (`N` opens it, `Tab` cycles pages), matching Litematica's layout: **Main**, **Config** (generic, visuals, colors, performance, hotkeys, info switches), **Materials**, **Placements** (rotation, mirroring, sub-region toggles, locking), **Render Layers**, **Area Editor**, **Loaded Schematics**, and **Tasks**.
+**A full on-screen menu, opened by tapping an icon.** There is a floating menu button on screen at all times — tap it and the menu opens; tap the **X** or anywhere outside and it closes. No keyboard, no controller, no trip to the launcher's Mod Menu. Every row is a touch target you can tap: toggles flip, choices cycle, sliders step, buttons fire. Tabs are tappable across the top.
+
+The pages match Litematica's layout: **Main**, **Config** (generic, visuals, colors, performance, hotkeys, info switches), **Materials**, **Placements** (rotation, mirroring, sub-region toggles, locking), **Render Layers**, **Area Editor**, **Loaded Schematics**, and **Tasks**.
 
 **Easy Place** — look at a ghost block and the mod works out which block to place and which way it should face, so stairs and the like orient correctly. It reports the decision; it does not place anything without your command.
 
@@ -153,6 +155,10 @@ Press **S** (the *Export* button) and the loaded schematic is written to the mod
 | `X` | Mirror | Mirrors the placement |
 | `C` | Export CSV | Writes the live material list as CSV |
 | `W` | Save `.litematic` | Captures the region from the world and saves it |
+| `T` | Tool mode | Cycles the nine tool modes (also **L1/R1**) |
+| `A` | Use tool | Acts with the current tool mode |
+| `N` | Menu | Opens the menu (the floating icon does the same) |
+| `Tab` | Menu tab | Advances the menu page |
 
 ### Mod Menu integration
 BiteMatica registers a native Mod Menu module with a master toggle and live config: **Render Mode**, **Opacity**, **Layers**, **Material List**, **Ghost Placement**, and **Verify World**. Turning the module off clears the overlay instead of leaving stale geometry on screen.
@@ -228,7 +234,7 @@ cmake --build build/host --target bitematica_tests bitematica_world_tests
 ./build/host/bitematica_world_tests  # placement transforms, mesher, verification, translation
 ```
 
-**223 checks across the three suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
+**238 checks across the three suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
 
 The world suite covers the parts most likely to be subtly wrong and hardest to debug on a device: the placement transform (every rotation × mirror round-trips `toWorld`/`toLocal`), the mesher (a solid 3×3×3 collapses to a handful of merged quads, and interior faces are culled), placement-local frustum culling (the local→world transform is pinned against the shader's own rotation signs), verification (missing/wrong/extra counted against a fake world), the Java→Bedrock direction inversion, and the `.litematic` write→read round trip.
 

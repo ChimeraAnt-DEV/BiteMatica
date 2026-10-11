@@ -51,7 +51,9 @@
 #include "litematica/PlacementManager.hpp"
 #include "litematica/ToolMode.hpp"
 #include "mesh/SectionMesher.hpp"
+#include "ui/MenuBuilder.hpp"
 #include "ui/MenuModel.hpp"
+#include "ui/MenuRenderer.hpp"
 #include "mod/Config.hpp"
 #include "mod/ControllerNavigator.hpp"
 #include "mod/GameWorldSource.hpp"
@@ -257,8 +259,37 @@ private:
   bitematica::litematica::ToolMode mToolMode{bitematica::litematica::ToolMode::AreaSelection};
   bitematica::litematica::PlacementManager mPlacements;
   bitematica::world::Selection mSelection;
+
+  // Menu state. The pages are rebuilt whenever the underlying state changes, so the menu always
+  // reflects the live config and placements.
+  std::vector<bitematica::ui::MenuPage> mMenuPages;
   bool mMenuOpen{false};
   int mMenuTab{0};
+  int mMenuScroll{0};
+  /// Hitboxes from the last menu layout, matched against a tap.
+  std::vector<bitematica::ui::MenuHit> mMenuHits;
+  /// The panel bounds from the last layout, so a tap outside closes the menu.
+  struct Panel {
+    float x{};
+    float y{};
+    float w{};
+    float h{};
+  };
+  Panel mMenuPanel{};
+  float mMenuIconX{};
+  float mMenuIconY{};
+  float mMenuIconSize{52.0f};
+
+  /// Rebuilds the menu pages from the live config and placement state.
+  void rebuildMenuPages();
+  /// Handles a tap while the menu is open. Returns true when the tap was consumed.
+  bool handleMenuTouch(float x, float y);
+  /// Applies a widget interaction (toggle, choice, slider, button).
+  void activateWidget(bitematica::ui::Widget &widget);
+  /// Writes a menu widget's value back into the config.
+  void applyMenuConfig(const std::string &id, const std::string &value);
+  /// Runs a menu button's action.
+  void applyMenuAction(const std::string &id);
 };
 
 // --- lifecycle ----------------------------------------------------------------------
@@ -407,6 +438,10 @@ void BiteMaticaMod::installInputCallbacks() {
 }
 
 bool BiteMaticaMod::handleTouch(float x, float y) {
+  // The menu (and its floating icon) is checked first, so a tap on the icon or a menu row is never
+  // swallowed by the toolbar underneath.
+  if (handleMenuTouch(x, y)) return true;
+
   const auto *hit = HudOverlay::hitTest(mButtons, x, y);
   if (hit == nullptr) return false;
   mHint.clear();
@@ -1086,8 +1121,9 @@ void BiteMaticaMod::setStatus(const std::string &message) { mStatus = message; }
 
 void BiteMaticaMod::submitHud() {
   // Every input-driven change funnels through here, so this is where the render thread's copy of
-  // the placement and config is refreshed.
+  // the placement and config is refreshed, and where the menu pages are rebuilt to match.
   refreshRenderSnapshot();
+  rebuildMenuPages();
   mButtons = HudOverlay::layoutToolbar(mConfig);
 
   const pl::modmenu::HudSurfaceSize surface = pl::modmenu::getHudSurfaceSize();
@@ -1112,9 +1148,34 @@ void BiteMaticaMod::submitHud() {
   if (softwareOverlay && mHasSchematic && mConfig.renderMode != bitematica::mod::RenderMode::Hidden) {
     infoLine += "   [software overlay: update the launcher for world-space]";
   }
-  const std::vector<UiCommand> commands = HudOverlay::buildCommands(
+  std::vector<UiCommand> commands = HudOverlay::buildCommands(
       schematic(), mConfig, mCamera, mButtons, displayMaterials, infoLine,
       softwareOverlay && mHasSchematic);
+
+  // The floating menu icon is always drawn, so the menu is reachable with a tap and never needs a
+  // keyboard or the Mod Menu. It sits just below the toolbar so it does not cover it.
+  const float iconSize = 52.0f;
+  const float iconX = static_cast<float>(mConfig.toolbarX);
+  const float iconY = static_cast<float>(mConfig.toolbarY) +
+                      (bitematica::render::HudOverlay::kButtonSize * 4.0f) + 40.0f;
+  const auto icon = bitematica::ui::MenuRenderer::layoutIcon(iconX, iconY, iconSize, mMenuOpen);
+  mMenuIconX = iconX;
+  mMenuIconY = iconY;
+  mMenuIconSize = iconSize;
+  commands.insert(commands.end(), icon.commands.begin(), icon.commands.end());
+
+  // When the menu is open, lay out the active page and append it. Its hitboxes are stashed so a tap
+  // can be matched without re-deriving the layout.
+  mMenuHits.clear();
+  if (mMenuOpen && !mMenuPages.empty()) {
+    const int tab = std::clamp(mMenuTab, 0, static_cast<int>(mMenuPages.size()) - 1);
+    const auto layout = bitematica::ui::MenuRenderer::layout(
+        mMenuPages[static_cast<size_t>(tab)], tab, static_cast<int>(mMenuPages.size()),
+        mMenuScroll);
+    commands.insert(commands.end(), layout.commands.begin(), layout.commands.end());
+    mMenuHits = layout.hits;
+    mMenuPanel = {layout.panelX, layout.panelY, layout.panelW, layout.panelH};
+  }
 
   std::vector<pl::modmenu::DrawCommand> sdkCommands;
   sdkCommands.reserve(commands.size());
@@ -1133,6 +1194,219 @@ void BiteMaticaMod::submitHud() {
     sdkCommands.push_back(std::move(out));
   }
   pl::modmenu::submitDrawCommands(kModuleId, sdkCommands);
+}
+
+void BiteMaticaMod::rebuildMenuPages() {
+  // The menu reflects the live state: the config, the placements, the material counts and the
+  // loaded files. Rebuilding it on every change keeps the two from drifting.
+  bitematica::ui::MenuBuilder::Context context;
+  context.config = &mConfig;
+  context.placements = &mPlacements;
+  context.toolMode = mToolMode;
+  context.layers.mode = static_cast<bitematica::litematica::LayerMode>(
+      static_cast<int>(mConfig.layerMode));
+  context.layers.layer = mConfig.layerSingle;
+  context.layers.layerMax = mConfig.layerMax;
+  context.statusLine = mStatus;
+  context.worldSpace = worldSpaceActive();
+  context.worldReadable = mWorldSource.available();
+  for (const auto &row : mLiveMaterials) {
+    context.materials.emplace_back(row.name, row.required, row.placed, row.missing);
+  }
+  if (context.materials.empty()) {
+    for (const auto &entry : mMaterials) {
+      context.materials.emplace_back(entry.name, static_cast<long long>(entry.count), 0,
+                                     static_cast<long long>(entry.count));
+    }
+  }
+  for (const auto &file : mFiles) {
+    context.loadedNames.push_back(std::filesystem::path(file).filename().string());
+  }
+  if (!mFiles.empty()) {
+    context.tasks.push_back("mesh build (worker)");
+  }
+
+  mMenuPages = bitematica::ui::MenuBuilder::buildAll(context);
+}
+
+void BiteMaticaMod::activateWidget(bitematica::ui::Widget &widget) {
+  // A tap on a row changes it. Toggles flip, choices cycle, sliders step by 10% of their range, and
+  // buttons fire. Everything writes back through the config so the change persists.
+  switch (widget.kind) {
+    case bitematica::ui::WidgetKind::Toggle: {
+      const bool on = widget.value == "true";
+      widget.value = on ? "false" : "true";
+      applyMenuConfig(widget.id, widget.value);
+      return;
+    }
+    case bitematica::ui::WidgetKind::Choice: {
+      int index = 0;
+      for (char c : widget.value) {
+        if (c >= '0' && c <= '9') index = index * 10 + (c - '0');
+      }
+      index = (index + 1) % static_cast<int>(widget.choices.size());
+      widget.value = std::to_string(index);
+      applyMenuConfig(widget.id, widget.value);
+      return;
+    }
+    case bitematica::ui::WidgetKind::Slider: {
+      int value = 0;
+      for (char c : widget.value) {
+        if (c >= '0' && c <= '9') value = value * 10 + (c - '0');
+      }
+      const int step = std::max(1, (widget.maxValue - widget.minValue) / 10);
+      value += step;
+      if (value > widget.maxValue) value = widget.minValue;
+      widget.value = std::to_string(value);
+      applyMenuConfig(widget.id, widget.value);
+      return;
+    }
+    case bitematica::ui::WidgetKind::Button:
+      applyMenuAction(widget.id);
+      return;
+    default:
+      return;
+  }
+}
+
+bool BiteMaticaMod::handleMenuTouch(float x, float y) {
+  // The icon toggles the menu and is checked first, so it works whether the menu is open or closed.
+  if (x >= mMenuIconX && x <= mMenuIconX + mMenuIconSize && y >= mMenuIconY &&
+      y <= mMenuIconY + mMenuIconSize) {
+    mMenuOpen = !mMenuOpen;
+    mMenuScroll = 0;
+    rebuildMenuPages();
+    submitHud();
+    return true;
+  }
+  if (!mMenuOpen) return false;
+
+  // A tap inside the panel is matched to a tab, a row or the close button.
+  for (const auto &hit : mMenuHits) {
+    if (x < hit.x || x > hit.x + hit.w || y < hit.y || y > hit.y + hit.h) continue;
+    switch (hit.kind) {
+      case bitematica::ui::MenuHit::Kind::Close:
+        mMenuOpen = false;
+        submitHud();
+        return true;
+      case bitematica::ui::MenuHit::Kind::Tab:
+        mMenuTab = hit.tab;
+        mMenuScroll = 0;
+        submitHud();
+        return true;
+      case bitematica::ui::MenuHit::Kind::Widget: {
+        if (hit.widgetIndex < 0 ||
+            hit.widgetIndex >= static_cast<int>(mMenuPages.size()) ||
+            mMenuTab < 0 || mMenuTab >= static_cast<int>(mMenuPages.size())) {
+          return true;
+        }
+        auto &page = mMenuPages[static_cast<size_t>(mMenuTab)];
+        if (hit.widgetIndex < static_cast<int>(page.widgets.size())) {
+          activateWidget(page.widgets[static_cast<size_t>(hit.widgetIndex)]);
+          rebuildMenuPages();
+          submitHud();
+        }
+        return true;
+      }
+    }
+  }
+
+  // A tap outside the panel closes the menu, so it never traps the player.
+  if (x < mMenuPanel.x || x > mMenuPanel.x + mMenuPanel.w || y < mMenuPanel.y ||
+      y > mMenuPanel.y + mMenuPanel.h) {
+    mMenuOpen = false;
+    submitHud();
+    return true;
+  }
+  return true; // swallow taps on the panel background
+}
+
+void BiteMaticaMod::applyMenuConfig(const std::string &id, const std::string &value) {
+  const int number = std::atoi(value.c_str());
+  const bool flag = value == "true";
+
+  if (id == "enabled") mConfig.enabled = flag;
+  else if (id == "showMaterialList") mConfig.showMaterialList = flag;
+  else if (id == "showToolbar") mConfig.showToolbar = flag;
+  else if (id == "ghostPlacement") mConfig.ghostPlacement = flag;
+  else if (id == "onlyExposed") mConfig.onlyExposed = flag;
+  else if (id == "verifyAgainstWorld") mConfig.verifyAgainstWorld = flag;
+  else if (id == "verifyExtras") mConfig.verifyExtras = flag;
+  else if (id == "renderMode") mConfig.renderMode = static_cast<bitematica::mod::RenderMode>(number);
+  else if (id == "opacity") mConfig.opacity = number;
+  else if (id == "layerMode") mConfig.layerMode = static_cast<bitematica::mod::LayerMode>(number);
+  else if (id == "layerSingle") mConfig.layerSingle = number;
+  else if (id == "layerMin") mConfig.layerMin = number;
+  else if (id == "layerMax") mConfig.layerMax = number;
+  else if (id == "maxTriangles") mConfig.maxTriangles = number;
+  else if (id == "renderDistance") mConfig.renderDistance = number;
+  else if (id == "maxRenderBlocks") mConfig.maxRenderBlocks = number;
+
+  mConfig.normalize();
+  saveConfig();
+  // A layer or mode change alters what is drawn, so the mesh and the status line are refreshed.
+  if (id == "layerMode" || id == "layerSingle" || id == "layerMin" || id == "layerMax") {
+    rebuildMeshAsync();
+  }
+  refreshStatusLine();
+}
+
+void BiteMaticaMod::applyMenuAction(const std::string &id) {
+  // Menu buttons reuse the toolbar's actions wherever the behaviour is the same, so there is one
+  // implementation per operation.
+  using Action = bitematica::render::ToolbarButton::Action;
+  if (id == "main.nextmode" || id == "placement.rotateCw") {
+    performAction(id == "main.nextmode" ? Action::CycleToolMode : Action::RotatePlacement);
+  } else if (id == "main.prevmode") {
+    mToolMode = bitematica::litematica::previousToolMode(mToolMode);
+  } else if (id == "placement.rotateCcw") {
+    performAction(Action::RotateLeft);
+  } else if (id == "placement.mirror") {
+    performAction(Action::CycleMirror);
+  } else if (id == "placement.moveToPlayer") {
+    performAction(Action::MoveToPlayer);
+  } else if (id == "placement.moveUp") {
+    performAction(Action::NudgeUp);
+  } else if (id == "placement.moveDown") {
+    performAction(Action::NudgeDown);
+  } else if (id == "placement.next") {
+    mPlacements.stepActive(1);
+  } else if (id == "placement.prev") {
+    mPlacements.stepActive(-1);
+  } else if (id == "materials.exportCsv") {
+    performAction(Action::ExportCsv);
+  } else if (id == "layer.stepUp") {
+    int lo = 0;
+    int hi = 0;
+    currentLayerRange(lo, hi);
+    mConfig.layerSingle = std::min(mConfig.layerSingle + 1, std::max(0, schematic().sizeY() - 1));
+    mConfig.layerMode = bitematica::mod::LayerMode::Single;
+    saveConfig();
+    rebuildMeshAsync();
+  } else if (id == "layer.stepDown") {
+    mConfig.layerSingle = std::max(0, mConfig.layerSingle - 1);
+    mConfig.layerMode = bitematica::mod::LayerMode::Single;
+    saveConfig();
+    rebuildMeshAsync();
+  } else if (id == "area.setCorner1" || id == "area.setCorner2" || id == "area.paste") {
+    applyTool();
+  } else if (id == "area.clear") {
+    mSelection.clear();
+    setStatus("Selection cleared");
+  } else if (id == "area.saveLitematic") {
+    performAction(Action::SaveLitematic);
+  } else if (id == "area.saveStructure") {
+    performAction(Action::ExportStructure);
+  } else if (id == "loaded.reload") {
+    performAction(Action::Reload);
+  } else if (id == "loaded.unload") {
+    mPlacements.clear();
+    mHasSchematic = false;
+    mSchematicPtr.reset();
+    setStatus("Unloaded");
+  }
+  refreshStatusLine();
+  submitHud();
 }
 
 void BiteMaticaMod::saveConfig() {

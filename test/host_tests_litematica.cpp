@@ -23,6 +23,7 @@
 #include "mod/Config.hpp"
 #include "ui/MenuBuilder.hpp"
 #include "ui/MenuModel.hpp"
+#include "ui/MenuRenderer.hpp"
 #include "world/Placement.hpp"
 #include "world/WorldSource.hpp"
 
@@ -354,6 +355,150 @@ void testMenuBuilderRejectsBadWidgets() {
   check(!model.validate(), "a slider with min > max is rejected");
 }
 
+void testMenuIconIsTappable() {
+  std::printf("testMenuIconIsTappable\n");
+  using bitematica::ui::MenuRenderer;
+
+  // The icon is the answer to "the menu needs a keyboard": it is drawn on screen and tapped. Its
+  // hitbox must cover the whole drawn tile, or a tap on the visible button would miss.
+  const auto icon = MenuRenderer::layoutIcon(100.0f, 200.0f, 52.0f, false);
+  check(!icon.commands.empty(), "the icon draws something");
+  check(icon.hit.x == 100.0f && icon.hit.y == 200.0f && icon.hit.w == 52.0f && icon.hit.h == 52.0f,
+        "the icon hitbox matches its position and size");
+
+  // The open state changes the colour, so the player can see the menu is open.
+  const auto open = MenuRenderer::layoutIcon(100.0f, 200.0f, 52.0f, true);
+  bool colourDiffers = false;
+  for (size_t i = 0; i < icon.commands.size() && i < open.commands.size(); ++i) {
+    if (icon.commands[i].color != open.commands[i].color) colourDiffers = true;
+  }
+  check(colourDiffers, "the icon changes colour when the menu is open");
+}
+
+void testMenuLayoutHitboxes() {
+  std::printf("testMenuLayoutHitboxes\n");
+  using bitematica::ui::MenuBuilder;
+  using bitematica::ui::MenuHit;
+  using bitematica::ui::MenuRenderer;
+  using bitematica::ui::MenuTab;
+
+  bitematica::mod::Config config;
+  bitematica::litematica::PlacementManager placements;
+  MenuBuilder::Context context;
+  context.config = &config;
+  context.placements = &placements;
+  context.statusLine = "ready";
+
+  const auto pages = MenuBuilder::buildAll(context);
+  const auto &configPage = pages[static_cast<size_t>(MenuTab::Config)];
+  const auto layout = MenuRenderer::layout(configPage, static_cast<int>(MenuTab::Config),
+                                           static_cast<int>(pages.size()), 0);
+
+  check(!layout.commands.empty(), "the menu lays out draw commands");
+  check(layout.panelW > 0.0f && layout.panelH > 0.0f, "the panel has a size");
+
+  // There must be one hitbox per tab, plus a close button, plus one per visible row.
+  int tabHits = 0;
+  int closeHits = 0;
+  int widgetHits = 0;
+  for (const auto &hit : layout.hits) {
+    if (hit.kind == MenuHit::Kind::Tab) ++tabHits;
+    if (hit.kind == MenuHit::Kind::Close) ++closeHits;
+    if (hit.kind == MenuHit::Kind::Widget) ++widgetHits;
+  }
+  check(tabHits == static_cast<int>(pages.size()), "one hitbox per tab");
+  check(closeHits == 1, "a close button exists");
+  check(widgetHits > 0, "interactive rows have hitboxes");
+
+  // Every hitbox must lie inside the panel, or a tap could never reach it.
+  bool allInside = true;
+  for (const auto &hit : layout.hits) {
+    if (hit.x < layout.panelX || hit.y < layout.panelY ||
+        hit.x + hit.w > layout.panelX + layout.panelW + 0.5f ||
+        hit.y + hit.h > layout.panelY + layout.panelH + 0.5f) {
+      allInside = false;
+    }
+  }
+  check(allInside, "every hitbox is inside the panel");
+
+  // A tap on the middle of a widget hitbox must land on that widget: the hitboxes are what the
+  // touch handler walks, so this is the contract that makes the menu actually work.
+  const MenuHit *widget = nullptr;
+  for (const auto &hit : layout.hits) {
+    if (hit.kind == MenuHit::Kind::Widget) {
+      widget = &hit;
+      break;
+    }
+  }
+  check(widget != nullptr, "found a widget hitbox to test");
+  if (widget != nullptr) {
+    const float cx = widget->x + widget->w * 0.5f;
+    const float cy = widget->y + widget->h * 0.5f;
+    const MenuHit *found = nullptr;
+    for (const auto &hit : layout.hits) {
+      if (cx >= hit.x && cx <= hit.x + hit.w && cy >= hit.y && cy <= hit.y + hit.h) {
+        found = &hit;
+        break;
+      }
+    }
+    check(found != nullptr && found->widgetIndex == widget->widgetIndex,
+          "a tap in a widget's centre resolves to that widget");
+  }
+
+  // Usability invariants that a self-consistency check would miss:
+  //  1. every interactive hitbox is at least a minimum touch target tall, or a thumb cannot hit it;
+  //  2. no two interactive hitboxes overlap, or a tap is ambiguous.
+  const float kMinTouch = 28.0f;
+  std::vector<const MenuHit *> interactive;
+  bool bigEnough = true;
+  for (const auto &hit : layout.hits) {
+    if (hit.kind != MenuHit::Kind::Widget) continue;
+    interactive.push_back(&hit);
+    if (hit.h < kMinTouch) bigEnough = false;
+  }
+  check(bigEnough, "every widget hitbox is a reachable touch target");
+
+  bool overlap = false;
+  for (size_t i = 0; i < interactive.size(); ++i) {
+    for (size_t j = i + 1; j < interactive.size(); ++j) {
+      const MenuHit &a = *interactive[i];
+      const MenuHit &b = *interactive[j];
+      const bool disjoint = a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y ||
+                            b.y + b.h <= a.y;
+      if (!disjoint) overlap = true;
+    }
+  }
+  check(!overlap, "no two widget hitboxes overlap");
+}
+
+void testMenuScrollClampsRows() {
+  std::printf("testMenuScrollClampsRows\n");
+  using bitematica::ui::MenuBuilder;
+  using bitematica::ui::MenuRenderer;
+  using bitematica::ui::MenuTab;
+
+  bitematica::mod::Config config;
+  bitematica::litematica::PlacementManager placements;
+  MenuBuilder::Context context;
+  context.config = &config;
+  context.placements = &placements;
+
+  const auto pages = MenuBuilder::buildAll(context);
+  const auto &configPage = pages[static_cast<size_t>(MenuTab::Config)];
+  const int rows = MenuRenderer::rowCount(configPage);
+  check(rows > 0, "the config page has rows");
+
+  bitematica::ui::MenuMetrics metrics;
+  metrics.visibleRows = 5;
+  // Scrolling past the end must not produce rows, and must not read out of bounds.
+  const auto layout = MenuRenderer::layout(configPage, 0, 8, rows + 100, metrics);
+  int widgetHits = 0;
+  for (const auto &hit : layout.hits) {
+    if (hit.kind == bitematica::ui::MenuHit::Kind::Widget) ++widgetHits;
+  }
+  check(widgetHits == 0, "scrolling past the end shows no rows");
+}
+
 } // namespace
 
 int main() {
@@ -367,6 +512,9 @@ int main() {
   testPasteCommands();
   testMenuModel();
   testMenuBuilderRejectsBadWidgets();
+  testMenuIconIsTappable();
+  testMenuLayoutHitboxes();
+  testMenuScrollClampsRows();
   std::printf("===================================\n");
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
