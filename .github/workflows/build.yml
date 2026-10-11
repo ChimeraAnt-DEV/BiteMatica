@@ -92,6 +92,9 @@ jobs:
           chmod +x test/hud_geometry_guard.sh
           test/hud_geometry_guard.sh
 
+      - name: Check the packaged config and schema stay in sync
+        run: python3 tools/check_config_sync.py
+
       - name: Build and package .AntEgg
         run: |
           chmod +x build.sh
@@ -109,7 +112,8 @@ jobs:
               names = sorted(archive.namelist())
               print("\n".join(names))
               required = ["egg.json", "manifest.json", "bin/libbitematica.so",
-                          "config/config.json", "config/config.schema.json"]
+                          "config/config.json", "config/config.schema.json",
+                          "data/block_colors.json", "data/block_translation.json"]
               for entry in required:
                   if entry not in names:
                       sys.exit("missing required entry: " + entry)
