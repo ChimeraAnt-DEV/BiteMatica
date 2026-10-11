@@ -65,6 +65,19 @@
       "minimum": 0,
       "maximum": 1024
     },
+    "maxSchematicBlocks": {
+      "title": "Max Schematic Blocks",
+      "description": "A schematic above this many blocks is refused with a named error instead of risking an out-of-memory crash.",
+      "type": "integer",
+      "minimum": 100000
+    },
+    "uploadSectionsPerFrame": {
+      "title": "Upload Sections Per Frame",
+      "description": "GPU section uploads per frame (1-64). Spreads a large mesh upload so it cannot hitch the frame.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    },
     "layerMode": {
       "title": "Layer Mode",
       "description": "0 all layers, 1 a single layer, 2 a range.",
