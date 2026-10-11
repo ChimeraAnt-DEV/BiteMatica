@@ -18,15 +18,31 @@ namespace bitematica::litematica {
 struct PlacedSchematic {
   std::shared_ptr<const core::Schematic> schematic;
   world::Placement placement;
+  /// The source file this placement was loaded from, so the placement survives a restart (the
+  /// schematic itself is re-read from the file; only this id is persisted). Empty for an in-memory
+  /// placement that was never saved to disk.
+  std::string schematicId;
+  /// A user-chosen display name (defaults to the schematic name).
+  std::string displayName;
   /// Whether the placement is drawn and verified.
   bool visible{true};
   /// Whether the origin is pinned (Litematica's placement lock).
   bool locked{false};
   /// Per-sub-region visibility, one entry per region in the file.
   std::vector<bool> subRegionVisible{true};
+  /// Per-placement render settings (D1): layer mode and range on the chosen axis, opacity, outlines.
+  int layerMode{0};   ///< 0 all, 1 single, 2 range
+  int layerAxis{1};   ///< 0 X, 1 Y, 2 Z
+  int layerMin{0};
+  int layerMax{255};
+  int opacity{60};
+  bool showOutlines{true};
 
   /// The schematic's display name, or a placeholder.
-  std::string name() const { return schematic ? schematic->name : std::string("(empty)"); }
+  std::string name() const {
+    if (!displayName.empty()) return displayName;
+    return schematic ? schematic->name : std::string("(empty)");
+  }
   int sizeX() const { return schematic ? schematic->sizeX() : 0; }
   int sizeY() const { return schematic ? schematic->sizeY() : 0; }
   int sizeZ() const { return schematic ? schematic->sizeZ() : 0; }
@@ -100,9 +116,54 @@ public:
     return mActive;
   }
 
+  /// Records the current placement list on the undo stack (D11).
+  ///
+  /// Call this *before* a mutating edit (move/rotate/mirror/rename/delete) so the edit can be
+  /// undone. The stack is a bounded ring of 32 snapshots; the oldest is dropped when it is full.
+  /// The schematic pointers are shared, so a snapshot is cheap (the placement records are small).
+  void pushUndo() {
+    if (mUndo.size() == kUndoDepth) mUndo.erase(mUndo.begin());
+    mUndo.push_back({mPlacements, mActive});
+    // Any new edit invalidates the redo stack, as in every editor.
+    mRedo.clear();
+  }
+
+  /// Undoes the last edit. Returns false when there is nothing to undo.
+  bool undo() {
+    if (mUndo.empty()) return false;
+    mRedo.push_back({mPlacements, mActive});
+    if (mRedo.size() > kUndoDepth) mRedo.erase(mRedo.begin());
+    auto snapshot = std::move(mUndo.back());
+    mUndo.pop_back();
+    mPlacements = std::move(snapshot.placements);
+    mActive = snapshot.active;
+    return true;
+  }
+
+  /// Redoes the last undone edit. Returns false when there is nothing to redo.
+  bool redo() {
+    if (mRedo.empty()) return false;
+    mUndo.push_back({mPlacements, mActive});
+    auto snapshot = std::move(mRedo.back());
+    mRedo.pop_back();
+    mPlacements = std::move(snapshot.placements);
+    mActive = snapshot.active;
+    return true;
+  }
+
+  int undoDepth() const { return static_cast<int>(mUndo.size()); }
+  int redoDepth() const { return static_cast<int>(mRedo.size()); }
+
 private:
+  static constexpr size_t kUndoDepth = 32;
+  struct Snapshot {
+    std::vector<PlacedSchematic> placements;
+    int active{-1};
+  };
   std::vector<PlacedSchematic> mPlacements;
   int mActive{-1};
+  std::vector<Snapshot> mUndo;
+  std::vector<Snapshot> mRedo;
 };
 
 } // namespace bitematica::litematica

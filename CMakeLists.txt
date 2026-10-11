@@ -38,8 +38,10 @@ set(BITEMATICA_CORE_SOURCES
     src/world/Selection.cpp
     src/world/CheatPlacement.cpp
     src/translate/BlockTranslation.cpp
+    src/translate/BlockStateTransform.cpp
     src/core/LiveMaterials.cpp
     # Litematica toolset: pure logic, host-testable.
+    src/litematica/PlacementStore.cpp
     src/litematica/PasteJob.cpp
     src/litematica/EasyPlace.cpp
     src/render/GameCamera.cpp

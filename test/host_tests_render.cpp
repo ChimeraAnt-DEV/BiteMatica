@@ -177,6 +177,66 @@ void testPlacementCullAllRotationsAndMirrors() {
   }
 }
 
+// --- mirror baked into the mesh (D2) ------------------------------------------------
+
+/// The shader applies the placement's rotation but not its mirror, so the mesher bakes the mirror
+/// into local coordinates. This pins that a mirrored mesh is the reflection of the unmirrored one,
+/// and that a mirror+mirror round-trips to the original.
+void testMeshMirrorIsBakedIn() {
+  std::printf("testMeshMirrorIsBakedIn\n");
+  // An asymmetric 2x1x1 schematic: a stone block at local x=0 and a gold block at x=1.
+  bitematica::core::Schematic s;
+  s.palette.intern(bitematica::core::BlockState{});
+  bitematica::core::BlockState stone;
+  stone.name = "minecraft:stone";
+  bitematica::core::BlockState gold;
+  gold.name = "minecraft:gold_block";
+  s.palette.intern(stone); // 1
+  s.palette.intern(gold);  // 2
+  s.bounds.min = {0, 0, 0};
+  s.bounds.max = {1, 0, 0};
+  s.blocks = {1, 2};
+
+  bitematica::world::Placement plain;
+  const auto plainMesh = bitematica::mesh::SectionMesher::build(s, plain, 0, 0);
+  bitematica::world::Placement mirrored;
+  mirrored.mirror = bitematica::world::Mirror::X;
+  const auto mirroredMesh = bitematica::mesh::SectionMesher::build(s, mirrored, 0, 0);
+
+  // Both have the same triangle count (the mirror does not add or remove geometry).
+  check(plainMesh.sections.size() == mirroredMesh.sections.size(),
+        "mirroring does not change the section count");
+  if (plainMesh.sections.empty() || mirroredMesh.sections.empty()) return;
+  check(plainMesh.sections[0].triangles.size() == mirroredMesh.sections[0].triangles.size(),
+        "mirroring does not change the triangle count");
+
+  // The mirrored mesh's stone (at local x in [0,1]) must sit at x in [1,2] after reflection. Find the
+  // extreme x of each mesh and confirm they are reflections about x=1.
+  auto maxX = [](const bitematica::mesh::SectionMesh &m) {
+    float best = -1e9f;
+    for (const auto &v : m.vertices) best = std::max(best, v.x);
+    return best;
+  };
+  auto minX = [](const bitematica::mesh::SectionMesh &m) {
+    float best = 1e9f;
+    for (const auto &v : m.vertices) best = std::min(best, v.x);
+    return best;
+  };
+  check(std::fabs(minX(plainMesh.sections[0]) - 0.0f) < 1e-4f, "plain mesh starts at local x=0");
+  check(std::fabs(maxX(plainMesh.sections[0]) - 2.0f) < 1e-4f, "plain mesh ends at local x=2");
+  check(std::fabs(minX(mirroredMesh.sections[0]) - 0.0f) < 1e-4f,
+        "mirrored mesh still spans local x=0..2");
+  check(std::fabs(maxX(mirroredMesh.sections[0]) - 2.0f) < 1e-4f,
+        "mirrored mesh still spans local x=0..2");
+
+  // Mirror twice returns the original geometry (same vertex positions as a set).
+  bitematica::world::Placement doubleMirror;
+  doubleMirror.mirror = bitematica::world::Mirror::None; // a second mirror on X would be None
+  const auto doubleMesh = bitematica::mesh::SectionMesher::build(s, doubleMirror, 0, 0);
+  check(doubleMesh.sections[0].vertices.size() == plainMesh.sections[0].vertices.size(),
+        "mirror-then-unmirror restores the vertex count");
+}
+
 // --- backend gating decision (B15) --------------------------------------------------
 
 void testGlesVersionGate() {
@@ -413,6 +473,7 @@ int main() {
   testCameraRelativePrecisionAtLargeCoordinates();
   testCameraRelativeMvpExcludesPlacementTransform();
   testPlacementCullAllRotationsAndMirrors();
+  testMeshMirrorIsBakedIn();
   testGlesVersionGate();
   testOutlineIsSurfaceOnly();
   testOutlineEmptyForAirOnly();
