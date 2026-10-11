@@ -111,6 +111,25 @@
       "description": "Also flag world blocks sitting where the schematic wants air.",
       "type": "boolean"
     },
+    "verifyMismatchMode": {
+      "title": "Mismatch Display",
+      "description": "0 shows all ghost blocks, 1 shows only mismatches, 2 hides correct blocks.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2
+    },
+    "verifyBlocksPerFrame": {
+      "title": "Verify Blocks Per Frame",
+      "description": "How many blocks the verifier checks per frame (100-200000). Larger schematics are scanned incrementally at this rate.",
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 200000
+    },
+    "verifyGameVersionTag": {
+      "title": "Verified Game Version",
+      "description": "The game version the getBlock slot was confirmed against. The world source is only enabled when this matches the running version. See docs/FINDING_GETBLOCK.md.",
+      "type": "string"
+    },
     "verifyBlockSourceSlot": {
       "title": "BlockSource::getBlock Slot",
       "description": "Primary-vtable slot of the world block getter for your game build, or -1 to leave verification off. Only set this once you have confirmed the slot for your build: a wrong slot can crash the game.",

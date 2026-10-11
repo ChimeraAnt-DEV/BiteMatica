@@ -68,11 +68,19 @@ struct Config {
   bool verifyAgainstWorld = false;
   /// Whether to also scan air cells for stray world blocks (the "extra" status).
   bool verifyExtras = false;
+  /// Mismatch display mode (F6): 0 show all, 1 only mismatches, 2 hide correct.
+  int verifyMismatchMode = 0;
+  /// Blocks verified per frame (F5). A large schematic is scanned incrementally at this rate.
+  int verifyBlocksPerFrame = 2000;
   /// The `BlockSource::getBlock` primary-vtable slot for the running build, or -1 to leave
   /// verification off. There is no reliable way to discover this at runtime and a wrong slot faults
   /// the game thread, so it is a per-build constant a user sets once they have confirmed it. The
   /// default keeps the safe path: verification reports "world not readable" rather than guessing.
   int verifyBlockSourceSlot = -1;
+  /// The game version the slot above was verified against (F1). The world source is only enabled
+  /// when this matches the running game version, so a slot confirmed for one build is never used on
+  /// another. Empty means "not verified for any version".
+  std::string verifyGameVersionTag;
 
   /// Toolbar anchor in HUD pixels (top-left of the toolbar's panel).
   int toolbarX = 24;
@@ -127,6 +135,9 @@ struct Config {
     if (polygonOffsetFactor > 0.0f) polygonOffsetFactor = 0.0f;
     if (polygonOffsetUnits < -16.0f) polygonOffsetUnits = -16.0f;
     if (polygonOffsetUnits > 0.0f) polygonOffsetUnits = 0.0f;
+    if (verifyMismatchMode < 0 || verifyMismatchMode > 2) verifyMismatchMode = 0;
+    if (verifyBlocksPerFrame < 100) verifyBlocksPerFrame = 100;
+    if (verifyBlocksPerFrame > 200000) verifyBlocksPerFrame = 200000;
     // A slot of 0 or below means "unverified"; anything above the vtable's plausible size is
     // nonsense and is treated the same way.
     if (verifyBlockSourceSlot < 0 || verifyBlockSourceSlot > 512) verifyBlockSourceSlot = -1;

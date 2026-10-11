@@ -7,6 +7,7 @@
 #include "gles/Gles.hpp"
 #include "mesh/SectionMesher.hpp"
 #include "render/MathTypes.hpp"
+#include "world/Verifier.hpp"
 
 namespace bitematica::gles {
 
@@ -32,7 +33,41 @@ struct DrawOptions {
   bool outlines{false};
   /// Outline line width in pixels (clamped by the driver).
   float outlineWidth{1.5f};
+  /// Mismatch display mode (F6): all, only mismatches, or hide correct blocks. This is a shader
+  /// uniform, not a remesh — the geometry does not change when the mode does.
+  int mismatchMode{0};
+  /// The mismatch palette (C6). Colours the verdicts in the mismatch mode.
+  world::MismatchPalette palette{};
 };
+
+/// Extracts an 8-bit channel from a packed 0xAARRGGBB colour. `shift` is 16 (R), 8 (G), 0 (B) or
+/// 24 (A). Pure, so the palette upload is testable.
+inline float paletteChannel(uint32_t argb, int shift) {
+  return static_cast<float>((argb >> shift) & 0xff) / 255.0f;
+}
+
+/// The mismatch display modes (F6).
+enum class MismatchMode : int {
+  ShowAll = 0,       ///< draw every ghost block
+  OnlyMismatch = 1,  ///< draw only missing/wrong/extra blocks
+  HideCorrect = 2,   ///< draw everything except the blocks already correct (the common mode)
+};
+
+/// True when a block with this verdict should be drawn under the mode. Pure, so the mode's
+/// behaviour is host-testable without a GPU.
+inline bool drawsUnderMismatchMode(int mode, int verdict) {
+  // Verdicts match `world::BlockStatus`: Correct=0, Missing=1, WrongBlock=2, WrongState=3, Extra=4,
+  // Unknown=5. A shader uniform carries the mode; this mirrors its decision for the tests.
+  switch (static_cast<MismatchMode>(mode)) {
+    case MismatchMode::OnlyMismatch:
+      return verdict != 0 && verdict != 5; // draw mismatch, never the correct or unknown blocks
+    case MismatchMode::HideCorrect:
+      return verdict != 0; // hide correct, keep unknown so an unreadable area is visible
+    case MismatchMode::ShowAll:
+    default:
+      return true;
+  }
+}
 
 /// A GPU buffer for one section mesh.
 struct SectionBuffer {
@@ -175,6 +210,9 @@ private:
   GLint mUniformPlacementOrigin{-1};
   GLint mUniformPlacementYawCos{-1};
   GLint mUniformPlacementYawSin{-1};
+  GLint mUniformMode{-1};
+  GLint mUniformMismatchMode{-1};
+  GLint mUniformPalette{-1};
 
   /// A second, tiny program for the outline pass: the same vertex shader, a flat-colour fragment
   /// shader. Kept separate so the fill program's shading is untouched by line drawing.

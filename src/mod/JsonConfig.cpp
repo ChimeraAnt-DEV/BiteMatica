@@ -83,6 +83,7 @@ private:
       std::string value;
       if (!readString(value)) return false;
       if (key == "lastLoadedFile") config.lastLoadedFile = value;
+      else if (key == "verifyGameVersionTag") config.verifyGameVersionTag = value;
       return true;
     }
     // Number or boolean literal.
@@ -147,6 +148,8 @@ private:
     else if (key == "materialX") config.materialX = value;
     else if (key == "materialY") config.materialY = value;
     else if (key == "maxRenderDistance") config.maxRenderDistance = value;
+    else if (key == "verifyMismatchMode") config.verifyMismatchMode = value;
+    else if (key == "verifyBlocksPerFrame") config.verifyBlocksPerFrame = value;
   }
 
   const std::string &mText;
@@ -213,7 +216,10 @@ std::string JsonConfig::serialize(const Config &config) {
   out += "  \"polygonOffsetUnits\": " + std::to_string(config.polygonOffsetUnits) + ",\n";
   out += "  \"verifyAgainstWorld\": " + boolean(config.verifyAgainstWorld) + ",\n";
   out += "  \"verifyExtras\": " + boolean(config.verifyExtras) + ",\n";
+  out += "  \"verifyMismatchMode\": " + std::to_string(config.verifyMismatchMode) + ",\n";
+  out += "  \"verifyBlocksPerFrame\": " + std::to_string(config.verifyBlocksPerFrame) + ",\n";
   out += "  \"verifyBlockSourceSlot\": " + std::to_string(config.verifyBlockSourceSlot) + ",\n";
+  out += "  \"verifyGameVersionTag\": \"" + escape(config.verifyGameVersionTag) + "\",\n";
   out += "  \"toolbarX\": " + std::to_string(config.toolbarX) + ",\n";
   out += "  \"toolbarY\": " + std::to_string(config.toolbarY) + ",\n";
   out += "  \"materialX\": " + std::to_string(config.materialX) + ",\n";

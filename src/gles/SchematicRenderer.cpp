@@ -15,12 +15,14 @@ constexpr const char *kVertexSource = R"(#version 300 es
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec4 aColor;
 layout(location = 2) in float aFace;
+layout(location = 3) in float aVerdict;
 uniform mat4 uMvp;
 uniform vec3 uPlacementOrigin;
 uniform float uPlacementYawCos;
 uniform float uPlacementYawSin;
 out vec4 vColor;
 out float vFace;
+out float vVerdict;
 void main() {
   // Rotate about the placement origin by the placement's yaw, then offset to camera-relative space.
   vec3 p = aPosition;
@@ -29,6 +31,7 @@ void main() {
   p = vec3(rx, p.y, rz) + uPlacementOrigin;
   vColor = aColor;
   vFace = aFace;
+  vVerdict = aVerdict;
   gl_Position = uMvp * vec4(p, 1.0);
 }
 )";
@@ -37,13 +40,30 @@ constexpr const char *kFragmentSource = R"(#version 300 es
 precision mediump float;
 in vec4 vColor;
 in float vFace;
+in float vVerdict;
 uniform float uAlpha;
 uniform int uMode;
+uniform int uMismatchMode;
+uniform vec4 uPalette[6];
 out vec4 fragColor;
 void main() {
+  // The mismatch display modes (F6). The verdict is an integer 0..5; the mode decides whether this
+  // fragment is drawn at all. `discard` avoids a per-vertex remesh when the mode changes.
+  int verdict = int(vVerdict + 0.5);
+  bool correct = verdict == 0;
+  bool unknown = verdict == 5;
+  if (uMode == 2) { // mismatch mode: colour by verdict, honour the display filter
+    if (uMismatchMode == 1 && (correct || unknown)) discard; // only mismatches
+    if (uMismatchMode == 2 && correct) discard;               // hide correct
+  }
   // A little directional shading so faces read apart without any lighting model.
   float shade = vFace < 0.5 ? 1.0 : (vFace < 1.5 ? 0.82 : 0.6);
-  fragColor = vec4(vColor.rgb * shade, vColor.a * uAlpha);
+  vec3 rgb = vColor.rgb;
+  if (uMode == 2) {
+    vec4 pal = uPalette[clamp(verdict, 0, 5)];
+    rgb = pal.rgb;
+  }
+  fragColor = vec4(rgb * shade, vColor.a * uAlpha);
 }
 )";
 
@@ -53,6 +73,7 @@ constexpr const char *kLineFragmentSource = R"(#version 300 es
 precision mediump float;
 in vec4 vColor;
 in float vFace;
+in float vVerdict;
 uniform float uAlpha;
 out vec4 fragColor;
 void main() {
@@ -292,6 +313,9 @@ bool SchematicRenderer::initialize() {
   mUniformPlacementOrigin = getUniformLocation(mProgram, "uPlacementOrigin");
   mUniformPlacementYawCos = getUniformLocation(mProgram, "uPlacementYawCos");
   mUniformPlacementYawSin = getUniformLocation(mProgram, "uPlacementYawSin");
+  mUniformMode = getUniformLocation(mProgram, "uMode");
+  mUniformMismatchMode = getUniformLocation(mProgram, "uMismatchMode");
+  mUniformPalette = getUniformLocation(mProgram, "uPalette");
   mLineUniformMvp = getUniformLocation(mLineProgram, "uMvp");
   mLineUniformAlpha = getUniformLocation(mLineProgram, "uAlpha");
   mLineUniformPlacementOrigin = getUniformLocation(mLineProgram, "uPlacementOrigin");
@@ -317,6 +341,10 @@ void SchematicRenderer::bindVertexLayout() const {
   enableAttrib(2);
   attribPointer(2, 1, GL_UNSIGNED_BYTE, GL_FALSE, stride,
                 reinterpret_cast<const void *>(offsetof(mesh::MeshVertex, face)));
+  // The per-vertex verdict (F6), read as a normalized byte widened to float in the shader.
+  enableAttrib(3);
+  attribPointer(3, 1, GL_UNSIGNED_BYTE, GL_FALSE, stride,
+                reinterpret_cast<const void *>(offsetof(mesh::MeshVertex, verdict)));
 }
 
 bool SchematicRenderer::uploadSection(SectionBuffer &buffer, const mesh::SectionMesh &section) {
@@ -556,6 +584,25 @@ void SchematicRenderer::draw(const render::Mat4 &mvp, const render::Vec3 &camera
     }
     setPlacementUniforms(mProgram, mvp, cameraRelativeOrigin, placementRotationDegrees);
     if (mUniformAlpha >= 0) uniform1f(mUniformAlpha, options.alpha);
+    // The mismatch display mode and palette (F6). Cheap scalars/array, set every frame.
+    auto uniform1i = reinterpret_cast<void (*)(GLint, GLint)>(g.Uniform1i);
+    auto uniform4fv = reinterpret_cast<void (*)(GLint, GLsizei, const GLfloat *)>(g.Uniform4fv);
+    if (uniform1i && mUniformMode >= 0) uniform1i(mUniformMode, static_cast<GLint>(options.mode));
+    if (uniform1i && mUniformMismatchMode >= 0) {
+      uniform1i(mUniformMismatchMode, static_cast<GLint>(options.mismatchMode));
+    }
+    if (uniform4fv && mUniformPalette >= 0) {
+      // The palette in verdict order: Correct, Missing, WrongBlock, WrongState, Extra, Unknown.
+      const bitematica::world::MismatchPalette p = options.palette;
+      const GLfloat pal[6 * 4] = {
+          paletteChannel(p.correct, 16), paletteChannel(p.correct, 8), paletteChannel(p.correct, 0), paletteChannel(p.correct, 24),
+          paletteChannel(p.missing, 16), paletteChannel(p.missing, 8), paletteChannel(p.missing, 0), paletteChannel(p.missing, 24),
+          paletteChannel(p.wrongBlock, 16), paletteChannel(p.wrongBlock, 8), paletteChannel(p.wrongBlock, 0), paletteChannel(p.wrongBlock, 24),
+          paletteChannel(p.wrongState, 16), paletteChannel(p.wrongState, 8), paletteChannel(p.wrongState, 0), paletteChannel(p.wrongState, 24),
+          paletteChannel(p.extra, 16), paletteChannel(p.extra, 8), paletteChannel(p.extra, 0), paletteChannel(p.extra, 24),
+          paletteChannel(p.unknown, 16), paletteChannel(p.unknown, 8), paletteChannel(p.unknown, 0), paletteChannel(p.unknown, 24)};
+      uniform4fv(mUniformPalette, 6, pal);
+    }
     drawSectionList(g, mProgram, mUniformAlpha, options.alpha, sections, localCameraPosition,
                     options.maxDistance, localFrustum, false, mLastTriangles, mLastSections);
     if (polygonOffset) {
