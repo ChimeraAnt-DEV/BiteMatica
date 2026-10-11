@@ -38,7 +38,12 @@ set(BITEMATICA_CORE_SOURCES
     src/world/Selection.cpp
     src/world/CheatPlacement.cpp
     src/translate/BlockTranslation.cpp
-    src/core/LiveMaterials.cpp)
+    src/core/LiveMaterials.cpp
+    # Litematica toolset: pure logic, host-testable.
+    src/litematica/PasteJob.cpp
+    src/litematica/EasyPlace.cpp
+    src/render/GameCamera.cpp
+    src/ui/MenuBuilder.cpp)
 
 add_library(bitematica_core STATIC ${BITEMATICA_CORE_SOURCES})
 target_include_directories(bitematica_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -102,7 +107,8 @@ if(ANDROID)
       src/mod/BiteMaticaMod.cpp
       src/mod/GameWorldSource.cpp
       src/gles/Gles.cpp
-      src/gles/SchematicRenderer.cpp)
+      src/gles/SchematicRenderer.cpp
+      src/gles/EglFrameSource.cpp)
   target_include_directories(bitematica PRIVATE "${PRELOADER_ANDROID_ROOT}/include")
   target_link_libraries(bitematica PRIVATE bitematica_core fmt::fmt ${ANDROID_LOG_LIB})
   # The GLES entry points are resolved with dlopen/dlsym at runtime, never linked.
@@ -151,6 +157,12 @@ if(NOT ANDROID)
       BITEMATICA_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   add_test(NAME bitematica_world_tests COMMAND bitematica_world_tests)
 
+  add_executable(bitematica_litematica_tests test/host_tests_litematica.cpp)
+  target_link_libraries(bitematica_litematica_tests PRIVATE bitematica_core)
+  target_compile_definitions(bitematica_litematica_tests PRIVATE
+      BITEMATICA_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+  add_test(NAME bitematica_litematica_tests COMMAND bitematica_litematica_tests)
+
   # A syntax-only check of the Android glue against stubbed Android/fmt headers. It compiles the
   # preloader-dependent translation units so a type error in the GLES renderer or the mod glue is
   # caught on a host, without an NDK. No binary is produced.
@@ -158,7 +170,8 @@ if(NOT ANDROID)
     add_library(bitematica_android_syntax OBJECT
         src/mod/GameWorldSource.cpp
         src/gles/Gles.cpp
-        src/gles/SchematicRenderer.cpp)
+        src/gles/SchematicRenderer.cpp
+        src/gles/EglFrameSource.cpp)
     target_include_directories(bitematica_android_syntax PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/test/stubs"

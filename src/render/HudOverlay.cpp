@@ -36,6 +36,9 @@ const ButtonSpec kButtons[] = {
     {Action::MoveToPlayer, "P"},  {Action::RotatePlacement, "R"},
     {Action::CycleMirror, "X"},   {Action::ExportCsv, "C"},
     {Action::SaveLitematic, "W"},
+    // Litematica toolset.
+    {Action::CycleToolMode, "T"}, {Action::ApplyTool, "A"},
+    {Action::OpenMenu, "N"},      {Action::CycleMenuTab, "Tab"},
 };
 
 constexpr int kColumns = 6;

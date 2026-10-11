@@ -27,6 +27,10 @@ const char *ControllerNavigator::actionName(render::ToolbarButton::Action action
     case Action::CycleMirror: return "Mirror placement";
     case Action::ExportCsv: return "Export material CSV";
     case Action::SaveLitematic: return "Save .litematic";
+    case Action::CycleToolMode: return "Cycle tool mode";
+    case Action::ApplyTool: return "Use tool";
+    case Action::OpenMenu: return "Open menu";
+    case Action::CycleMenuTab: return "Next menu tab";
   }
   return "Action";
 }
@@ -97,8 +101,8 @@ render::ToolbarButton::Action ControllerNavigator::actionForIndex(int index) {
       Action::NudgeDown,    Action::ToggleGhost, Action::ExportStructure,
       Action::Verify,       Action::CycleLayers, Action::MoveToPlayer,
       Action::RotatePlacement, Action::CycleMirror, Action::ExportCsv,
-      Action::SaveLitematic, Action::Reload, Action::ZoomIn,
-      Action::ZoomOut, Action::NudgeUp, Action::NudgeDown,
+      Action::SaveLitematic, Action::CycleToolMode, Action::ApplyTool,
+      Action::OpenMenu, Action::CycleMenuTab, Action::Reload,
   };
   const int count = static_cast<int>(sizeof(order) / sizeof(order[0]));
   if (index < 0) index = 0;
