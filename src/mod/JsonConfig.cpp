@@ -113,6 +113,8 @@ private:
     else if (key == "showToolbar") config.showToolbar = value;
     else if (key == "ghostPlacement") config.ghostPlacement = value;
     else if (key == "onlyExposed") config.onlyExposed = value;
+    else if (key == "verifyAgainstWorld") config.verifyAgainstWorld = value;
+    else if (key == "verifyExtras") config.verifyExtras = value;
   }
 
   static void applyNumber(const std::string &key, int value, Config &config) {
@@ -120,6 +122,12 @@ private:
     else if (key == "renderMode") config.renderMode = static_cast<RenderMode>(value);
     else if (key == "opacity") config.opacity = value;
     else if (key == "maxRenderBlocks") config.maxRenderBlocks = value;
+    else if (key == "maxTriangles") config.maxTriangles = value;
+    else if (key == "renderDistance") config.renderDistance = value;
+    else if (key == "layerMode") config.layerMode = static_cast<LayerMode>(value);
+    else if (key == "layerSingle") config.layerSingle = value;
+    else if (key == "layerMin") config.layerMin = value;
+    else if (key == "layerMax") config.layerMax = value;
     else if (key == "toolbarX") config.toolbarX = value;
     else if (key == "toolbarY") config.toolbarY = value;
     else if (key == "materialX") config.materialX = value;
@@ -179,6 +187,14 @@ std::string JsonConfig::serialize(const Config &config) {
   out += "  \"ghostPlacement\": " + boolean(config.ghostPlacement) + ",\n";
   out += "  \"onlyExposed\": " + boolean(config.onlyExposed) + ",\n";
   out += "  \"maxRenderBlocks\": " + std::to_string(config.maxRenderBlocks) + ",\n";
+  out += "  \"maxTriangles\": " + std::to_string(config.maxTriangles) + ",\n";
+  out += "  \"renderDistance\": " + std::to_string(config.renderDistance) + ",\n";
+  out += "  \"layerMode\": " + std::to_string(static_cast<int>(config.layerMode)) + ",\n";
+  out += "  \"layerSingle\": " + std::to_string(config.layerSingle) + ",\n";
+  out += "  \"layerMin\": " + std::to_string(config.layerMin) + ",\n";
+  out += "  \"layerMax\": " + std::to_string(config.layerMax) + ",\n";
+  out += "  \"verifyAgainstWorld\": " + boolean(config.verifyAgainstWorld) + ",\n";
+  out += "  \"verifyExtras\": " + boolean(config.verifyExtras) + ",\n";
   out += "  \"toolbarX\": " + std::to_string(config.toolbarX) + ",\n";
   out += "  \"toolbarY\": " + std::to_string(config.toolbarY) + ",\n";
   out += "  \"materialX\": " + std::to_string(config.materialX) + ",\n";

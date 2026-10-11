@@ -73,8 +73,9 @@ if ($Test) {
     $hostBuild = Join-Path $Root "build\host"
     python3 (Join-Path $Root "test\make_fixtures.py") (Join-Path $Root "test\fixtures")
     cmake -S $Root -B $hostBuild -DCMAKE_BUILD_TYPE=Release
-    cmake --build $hostBuild --target bitematica_tests
+    cmake --build $hostBuild --target bitematica_tests bitematica_world_tests
     & (Join-Path $hostBuild "bitematica_tests.exe")
+    & (Join-Path $hostBuild "bitematica_world_tests.exe")
 }
 
 Write-Host "==> Configuring Android build"

@@ -225,6 +225,87 @@ def make_structure(path):
         fp.write(root)
 
 
+def make_multi_region_litematic(path):
+    """A litematic with two regions at different positions, to exercise the merge path.
+
+    Region A is a 2x2x2 stone block at (0,0,0); region B is a 1x1x1 gold block at (5,3,-2). A
+    reader that only handled the first region, or that mishandled per-region palettes, would pass a
+    single-region test and fail this one.
+    """
+    palette_a = [
+        compound_body(tag_string("Name", "minecraft:air")),
+        compound_body(tag_string("Name", "minecraft:stone")),
+    ]
+    values_a = [1] * 8  # 2x2x2 all stone
+    region_a = compound(
+        "a",
+        compound("Position", tag_int("x", 0) + tag_int("y", 0) + tag_int("z", 0)),
+        compound("Size", tag_int("x", 2) + tag_int("y", 2) + tag_int("z", 2)),
+        tag_list_of_compounds("BlockStatePalette", palette_a),
+        tag_long_array("BlockStates", pack_long_array(values_a, 2)),
+    )
+
+    # Region B has its own palette, so the same palette index means a different block here.
+    palette_b = [
+        compound_body(tag_string("Name", "minecraft:air")),
+        compound_body(tag_string("Name", "minecraft:gold_block")),
+    ]
+    values_b = [1]
+    region_b = compound(
+        "b",
+        compound("Position", tag_int("x", 5) + tag_int("y", 3) + tag_int("z", -2)),
+        compound("Size", tag_int("x", 1) + tag_int("y", 1) + tag_int("z", 1)),
+        tag_list_of_compounds("BlockStatePalette", palette_b),
+        tag_long_array("BlockStates", pack_long_array(values_b, 2)),
+    )
+
+    metadata = compound(
+        "Metadata",
+        tag_string("Name", "Multi Region"),
+        tag_string("Author", "BiteMatica Tests"),
+        tag_string("Description", "Two regions at different offsets"),
+    )
+    root = compound(
+        "Schematic",
+        tag_int("MinecraftDataVersion", 3120),
+        tag_int("Version", 6),
+        metadata,
+        compound("Regions", region_a, region_b),
+    )
+    with open(path, "wb") as fp:
+        fp.write(gzip.compress(root))
+
+
+def make_negative_size_litematic(path):
+    """A litematic whose region has a negative size, the common Litematica encoding.
+
+    Litematica stores a region's extent as a signed size and lets the position be the far corner;
+    a reader that does not normalize this produces a mirrored or shifted build.
+    """
+    palette = [
+        compound_body(tag_string("Name", "minecraft:air")),
+        compound_body(tag_string("Name", "minecraft:stone")),
+    ]
+    values = [1] * 8
+    region = compound(
+        "neg",
+        compound("Position", tag_int("x", 1) + tag_int("y", 1) + tag_int("z", 1)),
+        compound("Size", tag_int("x", -2) + tag_int("y", -2) + tag_int("z", -2)),
+        tag_list_of_compounds("BlockStatePalette", palette),
+        tag_long_array("BlockStates", pack_long_array(values, 2)),
+    )
+    metadata = compound("Metadata", tag_string("Name", "Negative Size"))
+    root = compound(
+        "Schematic",
+        tag_int("MinecraftDataVersion", 3120),
+        tag_int("Version", 6),
+        metadata,
+        compound("Regions", region),
+    )
+    with open(path, "wb") as fp:
+        fp.write(gzip.compress(root))
+
+
 def main():
     out_dir = sys.argv[1] if len(sys.argv) > 1 else "test/fixtures"
     os.makedirs(out_dir, exist_ok=True)
@@ -232,6 +313,8 @@ def main():
     make_schem(os.path.join(out_dir, "cube.schem"))
     make_legacy_schematic(os.path.join(out_dir, "column.schematic"))
     make_structure(os.path.join(out_dir, "corner.nbt"))
+    make_multi_region_litematic(os.path.join(out_dir, "multi_region.litematic"))
+    make_negative_size_litematic(os.path.join(out_dir, "negative_size.litematic"))
     print("wrote fixtures to", out_dir)
 
 

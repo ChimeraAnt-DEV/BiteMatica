@@ -73,6 +73,14 @@ struct ToolbarButton {
     ExportStructure,
     ToggleMaterials,
     Reload,
+    // World-space additions.
+    Verify,        // compare against the live world
+    CycleLayers,   // all / single / range
+    MoveToPlayer,  // snap the placement origin to the player
+    RotatePlacement, // rotate the placement 90 degrees
+    CycleMirror,   // mirror the placement
+    ExportCsv,     // export the live material list as CSV
+    SaveLitematic, // save the loaded schematic (or a selection) as .litematic
   };
   Action action{Action::CycleMode};
   std::string label;
