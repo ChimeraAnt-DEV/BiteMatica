@@ -30,6 +30,7 @@ ZINCLUDE="${ZLIB_INCLUDE:-/acp-node/include/node}"
 SOURCES=(
   src/mod/BiteMaticaMod.cpp
   src/mod/GameWorldSource.cpp
+  src/mod/LocalPlayerFeed.cpp
   src/gles/Gles.cpp
   src/gles/SchematicRenderer.cpp
   src/gles/EglFrameSource.cpp
