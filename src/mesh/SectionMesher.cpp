@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <unordered_set>
 #include <vector>
 
 namespace bitematica::mesh {
@@ -195,6 +196,118 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
   }
 
   return mesh;
+}
+
+SectionMesher::OutlineResult SectionMesher::buildOutlines(const Schematic &schematic,
+                                                          const world::Placement &placement,
+                                                          int layerMin, int layerMax,
+                                                          uint32_t color, long long maxSegments) {
+  (void)placement; // geometry is local; the placement is applied at draw time.
+  OutlineResult result;
+  if (schematic.empty()) return result;
+
+  const int sizeX = schematic.sizeX();
+  const int sizeY = schematic.sizeY();
+  const int sizeZ = schematic.sizeZ();
+  const int sectionsX = (sizeX + kSectionSize - 1) / kSectionSize;
+  const int sectionsY = (sizeY + kSectionSize - 1) / kSectionSize;
+  const int sectionsZ = (sizeZ + kSectionSize - 1) / kSectionSize;
+
+  // A block-edge outline: every *surface* block's 12 cube edges, de-duplicated within the section so
+  // a shared edge is drawn once. This is the block silhouette (each exposed block outlined), which
+  // is what reads as a Litematica outline — not the triangle edges of the fill mesh. Edges on a
+  // section seam may be drawn by both sections; the only artefact is a marginally darker shared line.
+  auto solid = [&](int x, int y, int z) {
+    if (x < 0 || y < 0 || z < 0 || x >= sizeX || y >= sizeY || z >= sizeZ) return false;
+    if (y < layerMin || y > layerMax) return false;
+    return isSolid(schematic, x, y, z);
+  };
+
+  for (int sz = 0; sz < sectionsZ && !result.truncated; ++sz) {
+    for (int sy = 0; sy < sectionsY && !result.truncated; ++sy) {
+      for (int sx = 0; sx < sectionsX && !result.truncated; ++sx) {
+        SectionOutline out;
+        out.sectionX = sx;
+        out.sectionY = sy;
+        out.sectionZ = sz;
+        out.originX = static_cast<float>(sx * kSectionSize);
+        out.originY = static_cast<float>(sy * kSectionSize);
+        out.originZ = static_cast<float>(sz * kSectionSize);
+
+        const int minX = sx * kSectionSize;
+        const int minY = sy * kSectionSize;
+        const int minZ = sz * kSectionSize;
+        const int maxX = std::min(minX + kSectionSize, sizeX);
+        const int maxY = std::min(minY + kSectionSize, sizeY);
+        const int maxZ = std::min(minZ + kSectionSize, sizeZ);
+
+        // Canonical edge keys already emitted in this section. An edge is keyed by its axis and its
+        // lower lattice endpoint, so two surface blocks sharing an edge agree on the key.
+        std::unordered_set<std::uint64_t> emitted;
+
+        auto addEdge = [&](int axis, int x, int y, int z) {
+          const std::uint64_t key = (static_cast<std::uint64_t>(axis) << 42) |
+                                    (static_cast<std::uint64_t>(x + 0x100000) << 28) |
+                                    (static_cast<std::uint64_t>(y + 0x100000) << 14) |
+                                    static_cast<std::uint64_t>(z + 0x100000);
+          if (!emitted.insert(key).second) return;
+          // The edge runs one block along `axis` from the lower corner (x,y,z).
+          float a[3] = {static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)};
+          float b[3] = {a[0], a[1], a[2]};
+          b[axis] += 1.0f;
+          const uint32_t base = static_cast<uint32_t>(out.vertices.size());
+          for (const float *p : {a, b}) {
+            MeshVertex v;
+            v.x = p[0] - out.originX;
+            v.y = p[1] - out.originY;
+            v.z = p[2] - out.originZ;
+            v.color = color;
+            v.face = 1; // side tag; the line shader ignores it
+            out.vertices.push_back(v);
+          }
+          out.segments.push_back({base, base + 1, 0});
+        };
+
+        for (int z = minZ; z < maxZ; ++z) {
+          for (int y = minY; y < maxY; ++y) {
+            for (int x = minX; x < maxX; ++x) {
+              if (!solid(x, y, z)) continue;
+              // Only surface blocks contribute edges; an interior block has no visible outline.
+              const bool exposed = !solid(x - 1, y, z) || !solid(x + 1, y, z) ||
+                                   !solid(x, y - 1, z) || !solid(x, y + 1, z) ||
+                                   !solid(x, y, z - 1) || !solid(x, y, z + 1);
+              if (!exposed) continue;
+              // The four edges parallel to each axis, at the four corners of the block's cross-section.
+              for (int c = 0; c < 4; ++c) {
+                const int dx = (c & 1) ? 1 : 0;
+                const int dz = (c & 2) ? 1 : 0;
+                addEdge(1, x + dx, y, z + dz); // Y edges (vary y)
+              }
+              for (int c = 0; c < 4; ++c) {
+                const int dy = (c & 1) ? 1 : 0;
+                const int dz = (c & 2) ? 1 : 0;
+                addEdge(0, x, y + dy, z + dz); // X edges (vary x)
+              }
+              for (int c = 0; c < 4; ++c) {
+                const int dx = (c & 1) ? 1 : 0;
+                const int dy = (c & 2) ? 1 : 0;
+                addEdge(2, x + dx, y + dy, z); // Z edges (vary z)
+              }
+            }
+          }
+        }
+
+        if (out.empty()) continue;
+        result.emittedEdges += static_cast<long long>(out.segments.size());
+        if (result.emittedEdges > maxSegments) {
+          result.truncated = true;
+          break;
+        }
+        result.sections.push_back(std::move(out));
+      }
+    }
+  }
+  return result;
 }
 
 SectionMesher::Result SectionMesher::build(const Schematic &schematic,

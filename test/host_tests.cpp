@@ -377,6 +377,23 @@ void testConfigRoundTrip() {
   check(parsed.maxRenderBlocks == 12345, "int survives");
   check(parsed.lastLoadedFile == original.lastLoadedFile, "quoted string survives");
 
+  // The Phase B float fields must survive too (the scanner must distinguish them from ints).
+  bitematica::mod::Config floats;
+  floats.showOutlines = false;
+  floats.outlineWidth = 2.5f;
+  floats.polygonOffsetFactor = -3.0f;
+  floats.polygonOffsetUnits = -4.5f;
+  bitematica::mod::Config floatsParsed;
+  check(bitematica::mod::JsonConfig::parse(
+            bitematica::mod::JsonConfig::serialize(floats), floatsParsed, error),
+        std::string("float config parses back: ") + error);
+  check(!floatsParsed.showOutlines, "showOutlines survives");
+  check(std::fabs(floatsParsed.outlineWidth - 2.5f) < 1e-5f, "outlineWidth survives");
+  check(std::fabs(floatsParsed.polygonOffsetFactor + 3.0f) < 1e-5f,
+        "polygonOffsetFactor survives");
+  check(std::fabs(floatsParsed.polygonOffsetUnits + 4.5f) < 1e-5f,
+        "polygonOffsetUnits survives");
+
   // A malformed config must be reported, not silently accepted.
   bitematica::mod::Config ignored;
   check(!bitematica::mod::JsonConfig::parse("[1,2,3]", ignored, error),

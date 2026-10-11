@@ -68,7 +68,7 @@ jobs:
         run: cmake -S . -B build/host -DCMAKE_BUILD_TYPE=Release
 
       - name: Build host tests
-        run: cmake --build build/host --target bitematica_tests bitematica_world_tests bitematica_litematica_tests --parallel
+        run: cmake --build build/host --target bitematica_tests bitematica_world_tests bitematica_litematica_tests bitematica_render_tests --parallel
 
       - name: Run host tests (formats, mesh, UI)
         run: ./build/host/bitematica_tests
@@ -78,6 +78,9 @@ jobs:
 
       - name: Run host tests (Litematica toolset - tool modes, layers, ray-cast, Easy Place, paste, menus)
         run: ./build/host/bitematica_litematica_tests
+
+      - name: Run host tests (render math - camera-relative precision, culling, backend gate, outlines)
+        run: ./build/host/bitematica_render_tests
 
       - name: Check the mod loads on an older preloader (weak render symbols)
         run: |

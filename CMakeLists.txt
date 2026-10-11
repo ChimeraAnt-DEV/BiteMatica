@@ -165,6 +165,15 @@ if(NOT ANDROID)
       BITEMATICA_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   add_test(NAME bitematica_litematica_tests COMMAND bitematica_litematica_tests)
 
+  # Rendering math: the matrix chain, camera-relative precision at large coordinates, placement-local
+  # culling under every rotation/mirror, the backend gate and the outline generation. The GL calls
+  # themselves cannot run here, so this covers the *decisions* the renderer makes.
+  add_executable(bitematica_render_tests test/host_tests_render.cpp)
+  target_link_libraries(bitematica_render_tests PRIVATE bitematica_core)
+  target_compile_definitions(bitematica_render_tests PRIVATE
+      BITEMATICA_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+  add_test(NAME bitematica_render_tests COMMAND bitematica_render_tests)
+
   # A syntax-only check of the Android glue against stubbed Android/fmt headers. It compiles the
   # preloader-dependent translation units so a type error in the GLES renderer or the mod glue is
   # caught on a host, without an NDK. No binary is produced.
