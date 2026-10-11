@@ -33,8 +33,18 @@ set(BITEMATICA_CORE_SOURCES
 add_library(bitematica_core STATIC ${BITEMATICA_CORE_SOURCES})
 target_include_directories(bitematica_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-find_package(ZLIB REQUIRED)
-target_link_libraries(bitematica_core PUBLIC ZLIB::ZLIB)
+# zlib: the NDK's sysroot ships it, so Android links `z` directly; a host build uses
+# the system package. Both only need the classic inflate/deflate entry points.
+if(ANDROID)
+  find_library(BITEMATICA_ZLIB z)
+  if(NOT BITEMATICA_ZLIB)
+    message(FATAL_ERROR "zlib (libz) was not found in the NDK sysroot")
+  endif()
+  target_link_libraries(bitematica_core PUBLIC "${BITEMATICA_ZLIB}")
+else()
+  find_package(ZLIB REQUIRED)
+  target_link_libraries(bitematica_core PUBLIC ZLIB::ZLIB)
+endif()
 
 # -----------------------------------------------
 # Android native mod (.AntEgg `type: native`)
@@ -62,9 +72,24 @@ if(ANDROID)
 
   find_library(ANDROID_LOG_LIB log)
 
+  # The preloader's public headers (pl/Logger.hpp in particular) use fmt, so the mod
+  # needs fmt headers even though it links none of the preloader's code: the SDK symbols
+  # are resolved by the loader at runtime. Fetch fmt the same way the preloader does.
+  if(NOT TARGET fmt::fmt)
+    include(FetchContent)
+    FetchContent_Declare(
+        fmt
+        GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+        GIT_TAG 11.2.0)
+    set(FMT_DOC OFF CACHE BOOL "Disable fmt docs" FORCE)
+    set(FMT_TEST OFF CACHE BOOL "Disable fmt tests" FORCE)
+    set(FMT_INSTALL OFF CACHE BOOL "Disable fmt install rules" FORCE)
+    FetchContent_MakeAvailable(fmt)
+  endif()
+
   add_library(bitematica SHARED src/mod/BiteMaticaMod.cpp)
   target_include_directories(bitematica PRIVATE "${PRELOADER_ANDROID_ROOT}/include")
-  target_link_libraries(bitematica PRIVATE bitematica_core ${ANDROID_LOG_LIB})
+  target_link_libraries(bitematica PRIVATE bitematica_core fmt::fmt ${ANDROID_LOG_LIB})
   target_compile_options(bitematica PRIVATE
       $<$<COMPILE_LANG_AND_ID:CXX,Clang,GNU>:
         -Wall -Wextra -Wpedantic -fvisibility=hidden -fvisibility-inlines-hidden>)

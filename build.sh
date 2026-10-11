@@ -19,7 +19,8 @@ ABI="arm64-v8a"
 BUILD_DIR="$ROOT/build/android-$ABI"
 DIST_DIR="$ROOT/dist"
 PRELOADER_ROOT="$ROOT/third_party/preloader-android"
-PRELOADER_TAG="0.2.2"
+# The SDK's default branch; override with PRELOADER_REF to pin a commit or branch.
+PRELOADER_REF="${PRELOADER_REF:-main}"
 RUN_TESTS=0
 CLEAN=0
 NDK=""
@@ -67,9 +68,9 @@ TOOLCHAIN="$NDK_PATH/build/cmake/android.toolchain.cmake"
 echo "==> NDK: $NDK_PATH"
 
 if [ ! -f "$PRELOADER_ROOT/include/pl/Mod.hpp" ]; then
-  echo "==> Cloning preloader-android $PRELOADER_TAG into third_party/"
+  echo "==> Cloning preloader-android ($PRELOADER_REF) into third_party/"
   mkdir -p "$ROOT/third_party"
-  git clone --depth 1 --branch "$PRELOADER_TAG" \
+  git clone --depth 1 --branch "$PRELOADER_REF" \
     https://github.com/ChimeraAnt-DEV/preloader-android.git "$PRELOADER_ROOT"
 fi
 echo "==> Preloader: $PRELOADER_ROOT"

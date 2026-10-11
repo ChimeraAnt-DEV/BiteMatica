@@ -21,7 +21,8 @@ $DistDir = Join-Path $Root "dist"
 if ([string]::IsNullOrWhiteSpace($PreloaderRoot)) {
     $PreloaderRoot = Join-Path $Root "third_party\preloader-android"
 }
-$PreloaderTag = "0.2.2"
+# The SDK's default branch; override with $env:PRELOADER_REF to pin a branch or commit.
+$PreloaderRef = if ($env:PRELOADER_REF) { $env:PRELOADER_REF } else { "main" }
 
 function Resolve-Ndk {
     param([string]$Explicit)
@@ -60,9 +61,9 @@ $Toolchain = Join-Path $NdkPath "build\cmake\android.toolchain.cmake"
 Write-Host "==> NDK: $NdkPath"
 
 if (-not (Test-Path (Join-Path $PreloaderRoot "include\pl\Mod.hpp"))) {
-    Write-Host "==> Cloning preloader-android $PreloaderTag into third_party\"
+    Write-Host "==> Cloning preloader-android ($PreloaderRef) into third_party\"
     New-Item -ItemType Directory -Force -Path (Join-Path $Root "third_party") | Out-Null
-    git clone --depth 1 --branch $PreloaderTag `
+    git clone --depth 1 --branch $PreloaderRef `
         https://github.com/ChimeraAnt-DEV/preloader-android.git $PreloaderRoot
 }
 Write-Host "==> Preloader: $PreloaderRoot"
