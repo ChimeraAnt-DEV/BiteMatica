@@ -16,6 +16,23 @@
 //
 // Meshing is done off the render thread: a worker builds section meshes and hands them back, and the
 // render callback only uploads buffers that are ready and draws them. The render thread never meshes.
+//
+// Threading (Phase B13) — which thread owns which data:
+//
+//   * UI / input thread (touch, key, menu callbacks): owns `mConfig`, `mPlacement`, `mSelection`,
+//     `mPlacements`, the menu state and the library. It never touches GL and never reads
+//     `mSchematicPtr`'s contents except through `schematic()`. Changes publish a new
+//     `RenderSnapshot` (under `mRenderMutex`) and a new `MeshRequest` (under `mRequestMutex`).
+//   * Mesh worker thread: reads only the `MeshRequest` copy taken under `mRequestMutex`; it holds
+//     the immutable `shared_ptr<const Schematic>` and never reads any live member. It writes the
+//     finished meshes into `mPending` under `mPendingMutex`.
+//   * Render thread (the SDK/EGL render callback): the only thread that makes GL calls. It reads
+//     `RenderSnapshot` (under `mRenderMutex`), drains `mPending` (under `mPendingMutex`), uploads
+//     buffers and draws. It writes `mPlayerPosition`, the frame counters and `mRenderError`.
+//
+// The rule that keeps this correct: the worker and the render thread never read `mSchematicPtr`'s
+// pointee while it can change (it is only ever *replaced*, never mutated), and no GL call ever runs
+// outside the render callback.
 
 #include <pl/Input.hpp>
 #include <pl/Mod.hpp>
@@ -102,6 +119,7 @@ pl::render::Mat4 toSdkMatrix(const bitematica::render::Mat4 &m) {
 /// The mesh a worker produced, handed to the render thread through a mutex-guarded slot.
 struct PendingMesh {
   std::vector<bitematica::mesh::SectionMesh> sections;
+  std::vector<bitematica::mesh::SectionMesher::SectionOutline> outlines;
   bool ready{false};
   long long emittedQuads{};
   bool truncated{};
@@ -123,6 +141,8 @@ struct MeshRequest {
   int layerMin{};
   int layerMax{};
   int maxTriangles{};
+  bool outlines{};
+  uint32_t outlineColor{};
 };
 
 /// An immutable snapshot of the state the render callback reads.
@@ -137,6 +157,10 @@ struct RenderSnapshot {
   bool verifyAgainstWorld{};
   float opacity{1.0f};
   float renderDistance{256.0f};
+  bool showOutlines{};
+  float outlineWidth{1.5f};
+  float polygonOffsetFactor{-1.0f};
+  float polygonOffsetUnits{-1.0f};
   bitematica::world::Placement placement;
 };
 
@@ -177,6 +201,8 @@ private:
   void refreshRenderSnapshot();
   void rebuildMeshAsync();
   void uploadPendingMesh();
+  /// Frees every GL resource. Render thread only, with the context current.
+  void releaseGlResources();
   void onRenderFrame();
   void drawWorldSpace(const bitematica::render::CameraFrame &camera);
   bool performAction(bitematica::render::ToolbarButton::Action action);
@@ -220,7 +246,7 @@ private:
   std::atomic<bool> mEnabled{false};
   /// Which seam delivers the per-frame render callback.
   enum class RenderSeam {
-    None,       ///< no seam: the software overlay is used
+    None,       ///< no seam: nothing is drawn (the status line names the reason)
     Egl,        ///< `eglSwapBuffers`, version-independent (works on every 1.26 build)
     Preloader,  ///< the SDK render callback, only on a preloader that exports it
   };
@@ -232,13 +258,20 @@ private:
   int mViewportWidth{0};
   int mViewportHeight{0};
 
-  /// True when a per-frame seam was installed (EGL or preloader), so the schematic is drawn as
-  /// world-space GL geometry rather than through the software overlay.
+  /// A one-time render failure reason (backend unusable, program would not link), set from the
+  /// render thread and read by the status line.
+  std::mutex mRenderErrorMutex;
+  std::string mRenderError;
+  std::atomic<bool> mRenderErrorSet{false};
+
+  /// True when a per-frame seam was installed (EGL or preloader), so the schematic can be drawn as
+  /// world-space GL geometry. False means nothing is drawn.
   bool worldSpaceActive() const { return mRenderSeam != RenderSeam::None; }
 
   // GLES side (render thread).
   bitematica::gles::SchematicRenderer mRenderer;
   std::vector<bitematica::gles::SectionBuffer> mSectionBuffers;
+  std::vector<bitematica::gles::SectionBuffer> mOutlineBuffers;
 
   // Async meshing. The worker reads only a `MeshRequest` snapshot, never the live members.
   std::thread mMeshWorker;
@@ -248,6 +281,9 @@ private:
   std::atomic<bool> mMeshRequested{false};
   std::mutex mPendingMutex;
   PendingMesh mPending;
+  /// Set by disable()/unload(); the next render frame frees the GL resources with the context
+  /// current, then unregisters the callbacks. Never touched off the render thread once set.
+  std::atomic<bool> mGlShutdownRequested{false};
 
   // Render-thread snapshot, guarded by `mRenderMutex`.
   std::mutex mRenderMutex;
@@ -365,9 +401,17 @@ bool BiteMaticaMod::disable() {
   mEnabled.store(false, std::memory_order_release);
   mMeshWorkerStop.store(true, std::memory_order_release);
   if (mMeshWorker.joinable()) mMeshWorker.join();
-  bitematica::gles::EglFrameSource::setCallback(nullptr);
-  bitematica::mod::SdkRender::unregisterCallbacks(true);
   pl::modmenu::unregisterModule(kModuleId);
+
+  // GL resources must be freed with the context current, which only the render thread has. If a
+  // seam is live, leave it registered and let the next frame free the buffers, then unregister the
+  // callbacks itself; if no seam is live there is nothing to free, so unregister now.
+  if (worldSpaceActive()) {
+    mGlShutdownRequested.store(true, std::memory_order_release);
+  } else {
+    bitematica::gles::EglFrameSource::setCallback(nullptr);
+    bitematica::mod::SdkRender::unregisterCallbacks(true);
+  }
   if (mSelf != nullptr) mSelf->getLogger().info("BiteMatica disabled");
   return true;
 }
@@ -378,7 +422,24 @@ bool BiteMaticaMod::unload() {
   // be stopped and joined here too, not only in disable().
   mMeshWorkerStop.store(true, std::memory_order_release);
   if (mMeshWorker.joinable()) mMeshWorker.join();
+  // Ask for a GL teardown on the next render frame (the only place the context is current). If no
+  // seam is live, the resources were never created, so there is nothing to free.
+  if (worldSpaceActive()) {
+    mGlShutdownRequested.store(true, std::memory_order_release);
+  } else {
+    bitematica::gles::EglFrameSource::setCallback(nullptr);
+    bitematica::mod::SdkRender::unregisterCallbacks(true);
+  }
   return true;
+}
+
+void BiteMaticaMod::releaseGlResources() {
+  // Render thread only, with the GL context current.
+  for (auto &buffer : mSectionBuffers) mRenderer.releaseSection(buffer);
+  mSectionBuffers.clear();
+  for (auto &buffer : mOutlineBuffers) mRenderer.releaseSection(buffer);
+  mOutlineBuffers.clear();
+  mRenderer.shutdown();
 }
 
 // --- Mod Menu ------------------------------------------------------------------------
@@ -507,9 +568,19 @@ void BiteMaticaMod::installRenderCallback() {
         const auto built = bitematica::mesh::SectionMesher::build(
             *request.schematic, request.placement, request.layerMin, request.layerMax,
             request.maxTriangles);
+        // The outline (block-edge) geometry is built here too, on the worker, so the render thread
+        // only ever uploads buffers and draws.
+        std::vector<bitematica::mesh::SectionMesher::SectionOutline> outlines;
+        if (request.outlines) {
+          auto builtOutlines = bitematica::mesh::SectionMesher::buildOutlines(
+              *request.schematic, request.placement, request.layerMin, request.layerMax,
+              request.outlineColor);
+          outlines = std::move(builtOutlines.sections);
+        }
         {
           std::lock_guard<std::mutex> lock(mPendingMutex);
           mPending.sections = std::move(built.sections);
+          mPending.outlines = std::move(outlines);
           mPending.emittedQuads = built.emittedQuads;
           mPending.truncated = built.truncated;
           mPending.ready = true;
@@ -553,8 +624,20 @@ void BiteMaticaMod::retryRenderSeam() {
 }
 
 void BiteMaticaMod::onRenderFrame() {
-  // Cheap early-out on the snapshot's enabled flag, then the real draw. Called on the render thread
-  // with the GL context current, from whichever seam was installed.
+  // Called on the render thread with the GL context current, from whichever seam was installed.
+
+  // A pending teardown is serviced first: this is the only place the context is current, so it is
+  // where the buffers and program must be freed. After freeing, the callbacks are unregistered so
+  // no further frame reaches this function.
+  if (mGlShutdownRequested.exchange(false, std::memory_order_acq_rel)) {
+    releaseGlResources();
+    bitematica::gles::EglFrameSource::setCallback(nullptr);
+    bitematica::mod::SdkRender::unregisterCallbacks(true);
+    mRenderSeam = RenderSeam::None;
+    return;
+  }
+
+  // Cheap early-out on the snapshot's enabled flag, then the real draw.
   {
     std::lock_guard<std::mutex> lock(mRenderMutex);
     if (!mRenderSnapshot.enabled) return;
@@ -586,12 +669,19 @@ void BiteMaticaMod::onRenderFrame() {
   if (camera.viewportHeight > 0) {
     aspect = static_cast<float>(camera.viewportWidth) / static_cast<float>(camera.viewportHeight);
   }
+  // The local-player camera is the reliable path (it works on every build the feed works on) and it
+  // gives `view` and `projection` separately, which the camera-relative renderer needs.
   bitematica::render::Mat4 viewProjection;
+  bitematica::render::Mat4 view;
+  bitematica::render::Mat4 projection;
   bitematica::render::Vec3 eye;
   bitematica::render::Vec3 forward;
   if (bitematica::mod::LocalPlayerFeed::buildLocalCamera(70.0f, aspect, 0.05f, 1024.0f,
-                                                         viewProjection, eye, forward)) {
+                                                         viewProjection, eye, forward, view,
+                                                         projection)) {
     camera.viewProjection = viewProjection;
+    camera.view = view;
+    camera.projection = projection;
     camera.position = eye;
     camera.forward = forward;
     camera.valid = true;
@@ -612,9 +702,18 @@ void BiteMaticaMod::drawWorldSpace(const bitematica::render::CameraFrame &camera
   }
 
   // Lazy GL init: the first render frame is the first time we are on the render thread with a
-  // context, so this is where the program is compiled.
+  // context, so this is where the program is compiled. A failure (non-GLES-3 backend, or a program
+  // that will not link) is recorded once with its reason, so the status line can name it; nothing is
+  // drawn.
   if (!mRenderer.ready()) {
-    if (!mRenderer.initialize()) return;
+    if (!mRenderer.initialize()) {
+      if (!mRenderErrorSet.exchange(true, std::memory_order_acq_rel)) {
+        std::lock_guard<std::mutex> lock(mRenderErrorMutex);
+        mRenderError = std::string("world-space renderer unavailable: ") +
+                       mRenderer.backendDescription();
+      }
+      return;
+    }
   }
 
   // Upload any mesh the worker finished.
@@ -638,29 +737,38 @@ void BiteMaticaMod::drawWorldSpace(const bitematica::render::CameraFrame &camera
                                         static_cast<float>(placement.origin.z)};
   const float yaw = static_cast<float>(static_cast<int>(placement.rotation) * 90);
 
-  // Build the mvp and the cull from the same inputs. `mvp` stays the plain world->clip matrix
-  // (the shader applies the placement transform itself); the frustum and camera are in
-  // placement-local space, where section boxes are axis-aligned regardless of rotation.
-  const bitematica::render::PlacementCull cull =
-      bitematica::render::computePlacementCull(viewProjection, origin, yaw, mPlayerPosition);
+  // Build the camera-relative mvp and the placement-local cull from the same inputs. The transform
+  // chain is applied exactly once: the CPU subtracts the camera position in double precision (inside
+  // `computePlacementCull`) and the shader applies the placement's yaw and relative origin. The mvp
+  // never contains a world translation, so it stays exact at world coordinate ±3e7.
+  const bitematica::render::PlacementCull cull = bitematica::render::computePlacementCull(
+      camera.projection, camera.view, origin, yaw, mPlayerPosition);
 
-  const bitematica::gles::DrawMode mode =
-      snapshot.verifyAgainstWorld
-          ? bitematica::gles::DrawMode::Mismatch
-          : (snapshot.renderMode == static_cast<int>(bitematica::mod::RenderMode::Skeleton)
-                 ? bitematica::gles::DrawMode::Outlines
-                 : bitematica::gles::DrawMode::Translucent);
+  bitematica::gles::DrawOptions options;
+  options.mode = snapshot.verifyAgainstWorld
+                     ? bitematica::gles::DrawMode::Mismatch
+                     : (snapshot.renderMode == static_cast<int>(bitematica::mod::RenderMode::Skeleton)
+                            ? bitematica::gles::DrawMode::Outlines
+                            : bitematica::gles::DrawMode::Translucent);
+  options.alpha = snapshot.opacity;
+  options.maxDistance = snapshot.renderDistance;
+  options.polygonOffsetFactor = snapshot.polygonOffsetFactor;
+  options.polygonOffsetUnits = snapshot.polygonOffsetUnits;
+  options.outlines = snapshot.showOutlines;
+  options.outlineWidth = snapshot.outlineWidth;
 
-  mRenderer.draw(cull.mvp, origin, yaw, mode, snapshot.opacity, cull.localCamera,
-                 snapshot.renderDistance, cull.frustum, mSectionBuffers);
+  mRenderer.draw(cull.mvp, cull.cameraRelativeOrigin, yaw, options, cull.localCamera, cull.frustum,
+                 mSectionBuffers, mOutlineBuffers);
 }
 
 void BiteMaticaMod::uploadPendingMesh() {
   std::vector<bitematica::mesh::SectionMesh> sections;
+  std::vector<bitematica::mesh::SectionMesher::SectionOutline> outlines;
   {
     std::lock_guard<std::mutex> lock(mPendingMutex);
     if (!mPending.ready) return;
     sections.swap(mPending.sections);
+    outlines.swap(mPending.outlines);
     mPending.ready = false;
   }
 
@@ -675,6 +783,21 @@ void BiteMaticaMod::uploadPendingMesh() {
       mSectionBuffers.push_back(buffer);
     }
   }
+
+  // Upload the outline (block-edge) buffers for this same mesh generation.
+  for (auto &buffer : mOutlineBuffers) mRenderer.releaseSection(buffer);
+  mOutlineBuffers.clear();
+  mOutlineBuffers.reserve(outlines.size());
+  for (const auto &outline : outlines) {
+    bitematica::gles::SectionBuffer buffer;
+    const bitematica::render::Vec3 min{outline.originX, outline.originY, outline.originZ};
+    const bitematica::render::Vec3 max{outline.originX + bitematica::mesh::SectionMesher::kSectionSize,
+                                       outline.originY + bitematica::mesh::SectionMesher::kSectionSize,
+                                       outline.originZ + bitematica::mesh::SectionMesher::kSectionSize};
+    if (mRenderer.uploadOutlines(buffer, outline.vertices, outline.segments, min, max)) {
+      mOutlineBuffers.push_back(buffer);
+    }
+  }
 }
 
 void BiteMaticaMod::refreshRenderSnapshot() {
@@ -687,12 +810,15 @@ void BiteMaticaMod::refreshRenderSnapshot() {
   mRenderSnapshot.verifyAgainstWorld = mConfig.verifyAgainstWorld;
   mRenderSnapshot.opacity = static_cast<float>(mConfig.opacity) / 100.0f;
   mRenderSnapshot.renderDistance = static_cast<float>(mConfig.renderDistance);
+  mRenderSnapshot.showOutlines = mConfig.showOutlines;
+  mRenderSnapshot.outlineWidth = mConfig.outlineWidth;
+  mRenderSnapshot.polygonOffsetFactor = mConfig.polygonOffsetFactor;
+  mRenderSnapshot.polygonOffsetUnits = mConfig.polygonOffsetUnits;
   mRenderSnapshot.placement = mPlacement;
 }
 
 void BiteMaticaMod::rebuildMeshAsync() {
-  // In software-overlay mode there is no GL draw, so the section mesh is not needed; the overlay
-  // builds its own projection on demand. Skipping the worker avoids pointless background work.
+  // When no world-space seam is available nothing is drawn, so meshing would be pointless work.
   if (!worldSpaceActive()) return;
   // Snapshot the meshing inputs under the lock, then flag the worker. The worker reads only the
   // snapshot, so a load/rotate/edit on another thread cannot race it.
@@ -708,6 +834,9 @@ void BiteMaticaMod::rebuildMeshAsync() {
     mRequest.layerMin = layerMin;
     mRequest.layerMax = layerMax;
     mRequest.maxTriangles = mConfig.maxTriangles;
+    mRequest.outlines = mConfig.showOutlines;
+    // Outline colour: a light accent that reads against terrain. Verification recolours it later.
+    mRequest.outlineColor = 0xE64AE0A0u;
   }
   mMeshRequested.store(true, std::memory_order_release);
 }
@@ -1142,8 +1271,13 @@ void BiteMaticaMod::refreshStatusLine() {
   // The status line always names the render mode, so the user is never left guessing whether the
   // schematic is being drawn in world space. When it is not, the reason is spelled out and nothing
   // is drawn — there is no screen-space fallback.
-  char renderState[160];
-  if (mRenderSeam == RenderSeam::Preloader) {
+  // A one-time render failure (backend unusable / program would not link) takes precedence over the
+  // seam name: it is the more specific reason and it is why nothing is on screen.
+  char renderState[200];
+  if (mRenderErrorSet.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lock(mRenderErrorMutex);
+    std::snprintf(renderState, sizeof(renderState), "%s", mRenderError.c_str());
+  } else if (mRenderSeam == RenderSeam::Preloader) {
     std::snprintf(renderState, sizeof(renderState),
                   "World-space GL (sdk, frame %llu, %d sections, %d tris)",
                   mFramesDrawn.load(std::memory_order_relaxed), mRenderer.lastDrawnSections(),

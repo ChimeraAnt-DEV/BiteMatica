@@ -73,6 +73,9 @@ const Functions &resolve() {
   LOAD(BindTexture, "glBindTexture");
   LOAD(DrawElements, "glDrawElements");
   LOAD(DrawArrays, "glDrawArrays");
+  LOAD(PolygonOffset, "glPolygonOffset");
+  LOAD(LineWidth, "glLineWidth");
+  LOAD(GetString, "glGetString");
 #undef LOAD
 
   return g_functions;

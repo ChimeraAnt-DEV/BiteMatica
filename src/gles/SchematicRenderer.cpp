@@ -6,8 +6,11 @@
 namespace bitematica::gles {
 namespace {
 
-// Vertex shader: transforms a section-relative vertex by the world->clip matrix after applying the
-// placement's translation and yaw, so one section's VBO serves every placement transform.
+// Vertex shader: transforms a section-relative vertex into camera-relative space by applying the
+// placement's yaw and the placement origin *relative to the camera*, then multiplies by the
+// camera-relative clip matrix. `uMvp` is `projection * rotation(view)` and `uPlacementOrigin` is
+// `placementOrigin − cameraPosition`, so no large world coordinate ever enters a float here — the
+// subtraction was done in double precision on the CPU.
 constexpr const char *kVertexSource = R"(#version 300 es
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec4 aColor;
@@ -19,7 +22,7 @@ uniform float uPlacementYawSin;
 out vec4 vColor;
 out float vFace;
 void main() {
-  // Rotate about the placement origin by the placement's yaw, then translate to world space.
+  // Rotate about the placement origin by the placement's yaw, then offset to camera-relative space.
   vec3 p = aPosition;
   float rx = p.x * uPlacementYawCos - p.z * uPlacementYawSin;
   float rz = p.x * uPlacementYawSin + p.z * uPlacementYawCos;
@@ -41,6 +44,19 @@ void main() {
   // A little directional shading so faces read apart without any lighting model.
   float shade = vFace < 0.5 ? 1.0 : (vFace < 1.5 ? 0.82 : 0.6);
   fragColor = vec4(vColor.rgb * shade, vColor.a * uAlpha);
+}
+)";
+
+// Outline pass: the same vertex shader, a flat-colour fragment shader. A line vertex carries the
+// outline colour; alpha comes from the same uniform so the whole ghost fades together.
+constexpr const char *kLineFragmentSource = R"(#version 300 es
+precision mediump float;
+in vec4 vColor;
+in float vFace;
+uniform float uAlpha;
+out vec4 fragColor;
+void main() {
+  fragColor = vec4(vColor.rgb, vColor.a * uAlpha);
 }
 )";
 
@@ -165,10 +181,47 @@ void SchematicRenderer::restoreState(const SavedState &state) const {
   }
 }
 
+void SchematicRenderer::probeBackend() {
+  const Functions &g = resolve();
+  if (!g.usable()) {
+    mBackendUsable = false;
+    std::snprintf(mBackendDescription, sizeof(mBackendDescription),
+                  "GLES entry points unavailable (non-GL backend?)");
+    return;
+  }
+  if (g.GetString == nullptr) {
+    // No glGetString means we cannot confirm the version; treat the resolved core as enough.
+    mBackendUsable = true;
+    std::snprintf(mBackendDescription, sizeof(mBackendDescription), "OpenGL ES (version unknown)");
+    return;
+  }
+  using GetStringFn = const unsigned char *(*)(GLenum);
+  auto getString = reinterpret_cast<GetStringFn>(g.GetString);
+  const char *version = reinterpret_cast<const char *>(getString(GL_VERSION));
+  const char *renderer = reinterpret_cast<const char *>(getString(GL_RENDERER));
+  if (version == nullptr) {
+    mBackendUsable = false;
+    std::snprintf(mBackendDescription, sizeof(mBackendDescription), "GL_VERSION unavailable");
+    return;
+  }
+  mBackendUsable = isGles3OrLater(version);
+  std::snprintf(mBackendDescription, sizeof(mBackendDescription), "%s%s%s", version,
+                renderer != nullptr ? " / " : "", renderer != nullptr ? renderer : "");
+}
+
 bool SchematicRenderer::initialize() {
   if (mReady) return true;
   const Functions &g = resolve();
-  if (!g.usable()) return false;
+  if (!g.usable()) {
+    probeBackend();
+    return false;
+  }
+  probeBackend();
+  if (!mBackendUsable) {
+    // A non-GLES-3 backend (e.g. Vulkan-only): do not attempt GL calls. The caller reports the
+    // named reason from `backendDescription()` and draws nothing.
+    return false;
+  }
 
   auto createShader = reinterpret_cast<glCreateShader_t>(g.CreateShader);
   auto shaderSource = reinterpret_cast<glShaderSource_t>(g.ShaderSource);
@@ -194,28 +247,39 @@ bool SchematicRenderer::initialize() {
     return shader;
   };
 
-  const GLuint vs = compile(kVertexShaderType, kVertexSource);
-  const GLuint fs = compile(kFragmentShaderType, kFragmentSource);
-  if (vs == 0 || fs == 0) {
-    // A failed pair must not leak the shader that did compile.
-    if (vs != 0) deleteShader(vs);
-    if (fs != 0) deleteShader(fs);
-    return false;
-  }
-
-  mProgram = createProgram();
-  attachShader(mProgram, vs);
-  attachShader(mProgram, fs);
-  linkProgram(mProgram);
-  GLint linked = 0;
-  getProgramiv(mProgram, kLinkStatus, &linked);
-  // The shaders are owned by the program once attached; they are deleted either way.
-  deleteShader(vs);
-  deleteShader(fs);
-  if (linked == 0) {
-    if (mProgram != 0 && g.DeleteProgram) {
-      reinterpret_cast<void (*)(GLuint)>(g.DeleteProgram)(mProgram);
+  // Builds a program from a vertex+fragment source pair, deleting both shaders on any failure so a
+  // failed link never leaks. Returns 0 on failure.
+  auto buildProgram = [&](const char *vertexSrc, const char *fragmentSrc) -> GLuint {
+    const GLuint vs = compile(kVertexShaderType, vertexSrc);
+    const GLuint fs = compile(kFragmentShaderType, fragmentSrc);
+    if (vs == 0 || fs == 0) {
+      if (vs != 0) deleteShader(vs);
+      if (fs != 0) deleteShader(fs);
+      return 0;
     }
+    const GLuint program = createProgram();
+    attachShader(program, vs);
+    attachShader(program, fs);
+    linkProgram(program);
+    GLint linked = 0;
+    getProgramiv(program, kLinkStatus, &linked);
+    deleteShader(vs);
+    deleteShader(fs);
+    if (linked == 0) {
+      if (program != 0 && g.DeleteProgram) {
+        reinterpret_cast<void (*)(GLuint)>(g.DeleteProgram)(program);
+      }
+      return 0;
+    }
+    return program;
+  };
+
+  mProgram = buildProgram(kVertexSource, kFragmentSource);
+  if (mProgram == 0) return false;
+  mLineProgram = buildProgram(kVertexSource, kLineFragmentSource);
+  if (mLineProgram == 0) {
+    // Free the fill program too, so a partial init does not leak.
+    if (g.DeleteProgram) reinterpret_cast<void (*)(GLuint)>(g.DeleteProgram)(mProgram);
     mProgram = 0;
     return false;
   }
@@ -228,8 +292,31 @@ bool SchematicRenderer::initialize() {
   mUniformPlacementOrigin = getUniformLocation(mProgram, "uPlacementOrigin");
   mUniformPlacementYawCos = getUniformLocation(mProgram, "uPlacementYawCos");
   mUniformPlacementYawSin = getUniformLocation(mProgram, "uPlacementYawSin");
+  mLineUniformMvp = getUniformLocation(mLineProgram, "uMvp");
+  mLineUniformAlpha = getUniformLocation(mLineProgram, "uAlpha");
+  mLineUniformPlacementOrigin = getUniformLocation(mLineProgram, "uPlacementOrigin");
+  mLineUniformPlacementYawCos = getUniformLocation(mLineProgram, "uPlacementYawCos");
+  mLineUniformPlacementYawSin = getUniformLocation(mLineProgram, "uPlacementYawSin");
   mReady = true;
   return true;
+}
+
+void SchematicRenderer::bindVertexLayout() const {
+  const Functions &g = resolve();
+  auto enableAttrib = reinterpret_cast<glEnableVertexAttribArray_t>(g.EnableVertexAttribArray);
+  auto attribPointer = reinterpret_cast<glVertexAttribPointer_t>(g.VertexAttribPointer);
+  // MeshVertex: position(3 float) + colour(4 ubyte normalized) + face(1 ubyte) = 20 bytes. Both the
+  // fill and the line programs declare the same layout, so the VAO is reusable across them.
+  const GLsizei stride = static_cast<GLsizei>(sizeof(mesh::MeshVertex));
+  enableAttrib(0);
+  attribPointer(0, 3, GL_FLOAT, GL_FALSE, stride,
+                reinterpret_cast<const void *>(offsetof(mesh::MeshVertex, x)));
+  enableAttrib(1);
+  attribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride,
+                reinterpret_cast<const void *>(offsetof(mesh::MeshVertex, color)));
+  enableAttrib(2);
+  attribPointer(2, 1, GL_UNSIGNED_BYTE, GL_FALSE, stride,
+                reinterpret_cast<const void *>(offsetof(mesh::MeshVertex, face)));
 }
 
 bool SchematicRenderer::uploadSection(SectionBuffer &buffer, const mesh::SectionMesh &section) {
@@ -241,8 +328,6 @@ bool SchematicRenderer::uploadSection(SectionBuffer &buffer, const mesh::Section
   auto bufferData = reinterpret_cast<glBufferData_t>(g.BufferData);
   auto genVertexArrays = reinterpret_cast<glGenVertexArrays_t>(g.GenVertexArrays);
   auto bindVertexArray = reinterpret_cast<glBindVertexArray_t>(g.BindVertexArray);
-  auto enableAttrib = reinterpret_cast<glEnableVertexAttribArray_t>(g.EnableVertexAttribArray);
-  auto attribPointer = reinterpret_cast<glVertexAttribPointer_t>(g.VertexAttribPointer);
 
   if (!buffer.uploaded) {
     genBuffers(1, &buffer.vbo);
@@ -259,21 +344,7 @@ bool SchematicRenderer::uploadSection(SectionBuffer &buffer, const mesh::Section
   bufferData(GL_ELEMENT_ARRAY_BUFFER,
              static_cast<GLsizeiptr>(section.triangles.size() * sizeof(mesh::MeshTriangle)),
              section.triangles.data(), GL_STATIC_DRAW);
-
-  // MeshVertex: position(3 float) + color(4 ubyte normalized) + face(1 float) = 20 bytes.
-  const GLsizei stride = static_cast<GLsizei>(sizeof(mesh::MeshVertex));
-  enableAttrib(0);
-  attribPointer(0, 3, GL_FLOAT, GL_FALSE, stride,
-                reinterpret_cast<const void *>(offsetof(mesh::MeshVertex, x)));
-  enableAttrib(1);
-  attribPointer(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride,
-                reinterpret_cast<const void *>(offsetof(mesh::MeshVertex, color)));
-  // The shader declares aFace as a float; store it as a normalized byte offset is awkward, so
-  // instead point at the byte and let the shader convert. Simplest correct choice: re-interpret the
-  // face byte as a normalized unsigned byte attribute and widen in the shader.
-  enableAttrib(2);
-  attribPointer(2, 1, GL_UNSIGNED_BYTE, GL_FALSE, stride,
-                reinterpret_cast<const void *>(offsetof(mesh::MeshVertex, face)));
+  bindVertexLayout();
 
   buffer.indexCount = static_cast<int>(section.triangles.size() * 3);
   buffer.min = render::Vec3{section.originX, section.originY, section.originZ};
@@ -281,6 +352,49 @@ bool SchematicRenderer::uploadSection(SectionBuffer &buffer, const mesh::Section
                             section.originY + mesh::SectionMesher::kSectionSize,
                             section.originZ + mesh::SectionMesher::kSectionSize};
   buffer.uploaded = true;
+  buffer.linePrimitive = false;
+
+  bindVertexArray(0);
+  bindBuffer(GL_ARRAY_BUFFER, 0);
+  bindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+  return true;
+}
+
+bool SchematicRenderer::uploadOutlines(SectionBuffer &buffer,
+                                       const std::vector<mesh::MeshVertex> &lineVertices,
+                                       const std::vector<mesh::MeshTriangle> &lineSegments,
+                                       const render::Vec3 &min, const render::Vec3 &max) {
+  if (!mReady || lineSegments.empty()) return false;
+  const Functions &g = resolve();
+
+  auto genBuffers = reinterpret_cast<glGenBuffers_t>(g.GenBuffers);
+  auto bindBuffer = reinterpret_cast<glBindBuffer_t>(g.BindBuffer);
+  auto bufferData = reinterpret_cast<glBufferData_t>(g.BufferData);
+  auto genVertexArrays = reinterpret_cast<glGenVertexArrays_t>(g.GenVertexArrays);
+  auto bindVertexArray = reinterpret_cast<glBindVertexArray_t>(g.BindVertexArray);
+
+  if (!buffer.uploaded) {
+    genBuffers(1, &buffer.vbo);
+    genBuffers(1, &buffer.ibo);
+    genVertexArrays(1, &buffer.vao);
+  }
+  bindVertexArray(buffer.vao);
+  bindBuffer(GL_ARRAY_BUFFER, buffer.vbo);
+  bufferData(GL_ARRAY_BUFFER,
+             static_cast<GLsizeiptr>(lineVertices.size() * sizeof(mesh::MeshVertex)),
+             lineVertices.data(), GL_STATIC_DRAW);
+  bindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffer.ibo);
+  bufferData(GL_ELEMENT_ARRAY_BUFFER,
+             static_cast<GLsizeiptr>(lineSegments.size() * sizeof(mesh::MeshTriangle)),
+             lineSegments.data(), GL_STATIC_DRAW);
+  bindVertexLayout();
+
+  // A line index list: two indices per segment.
+  buffer.indexCount = static_cast<int>(lineSegments.size() * 2);
+  buffer.min = min;
+  buffer.max = max;
+  buffer.uploaded = true;
+  buffer.linePrimitive = true;
 
   bindVertexArray(0);
   bindBuffer(GL_ARRAY_BUFFER, 0);
@@ -305,23 +419,86 @@ void SchematicRenderer::releaseSection(SectionBuffer &buffer) {
 
 void SchematicRenderer::shutdown() {
   const Functions &g = resolve();
-  if (mProgram != 0 && g.DeleteProgram) {
-    reinterpret_cast<void (*)(GLuint)>(g.DeleteProgram)(mProgram);
+  if (g.DeleteProgram) {
+    auto deleteProgram = reinterpret_cast<void (*)(GLuint)>(g.DeleteProgram);
+    if (mProgram != 0) deleteProgram(mProgram);
+    if (mLineProgram != 0) deleteProgram(mLineProgram);
   }
   mProgram = 0;
+  mLineProgram = 0;
   mReady = false;
 }
 
-void SchematicRenderer::draw(const render::Mat4 &mvp, const render::Vec3 &placementOrigin,
-                             float placementRotationDegrees, DrawMode mode, float alpha,
-                             const render::Vec3 &localCameraPosition, float maxDistance,
+void SchematicRenderer::setPlacementUniforms(GLuint program, const render::Mat4 &mvp,
+                                             const render::Vec3 &cameraRelativeOrigin,
+                                             float placementRotationDegrees) const {
+  const Functions &g = resolve();
+  auto uniformMatrix = reinterpret_cast<glUniformMatrix4fv_t>(g.UniformMatrix4fv);
+  auto uniform1f = reinterpret_cast<glUniform1f_t>(g.Uniform1f);
+  auto uniform3f = reinterpret_cast<void (*)(GLint, GLfloat, GLfloat, GLfloat)>(g.Uniform3f);
+
+  const GLint uMvp = program == mProgram ? mUniformMvp : mLineUniformMvp;
+  const GLint uOrigin = program == mProgram ? mUniformPlacementOrigin : mLineUniformPlacementOrigin;
+  const GLint uCos = program == mProgram ? mUniformPlacementYawCos : mLineUniformPlacementYawCos;
+  const GLint uSin = program == mProgram ? mUniformPlacementYawSin : mLineUniformPlacementYawSin;
+
+  uniformMatrix(uMvp, 1, GL_FALSE, mvp.m);
+  const float yawRadians = placementRotationDegrees * 3.14159265358979f / 180.0f;
+  // Yaw is passed as pre-computed sin/cos so the shader avoids a trig call per vertex.
+  if (uniform3f && uOrigin >= 0) {
+    uniform3f(uOrigin, cameraRelativeOrigin.x, cameraRelativeOrigin.y, cameraRelativeOrigin.z);
+  }
+  if (uCos >= 0) uniform1f(uCos, std::cos(yawRadians));
+  if (uSin >= 0) uniform1f(uSin, std::sin(yawRadians));
+}
+
+/// Draws one list of section buffers with a program already bound. Shared by the fill pass, the
+/// outline pass and the outline-only mode, so the culling and state logic lives once.
+static void drawSectionList(const Functions &g, GLuint program, GLint uniformAlpha, float alpha,
+                            const std::vector<SectionBuffer> &sections,
+                            const render::Vec3 &localCameraPosition, float maxDistance,
+                            const render::Frustum &localFrustum, bool lines, int &triangles,
+                            int &sectionCount) {
+  auto bindVertexArray = reinterpret_cast<glBindVertexArray_t>(g.BindVertexArray);
+  auto drawElements = reinterpret_cast<glDrawElements_t>(g.DrawElements);
+  auto uniform1f = reinterpret_cast<glUniform1f_t>(g.Uniform1f);
+  (void)program;
+  if (uniformAlpha >= 0) uniform1f(uniformAlpha, alpha);
+
+  for (const SectionBuffer &section : sections) {
+    if (!section.uploaded || section.indexCount == 0) continue;
+    if (section.linePrimitive != lines) continue;
+    // Both culls run in placement-local space, where a section's box is axis-aligned regardless of
+    // the placement's rotation. The camera was transformed into this space by the caller.
+    if (maxDistance > 0.0f) {
+      const render::Vec3 center{(section.min.x + section.max.x) * 0.5f,
+                                (section.min.y + section.max.y) * 0.5f,
+                                (section.min.z + section.max.z) * 0.5f};
+      if (render::length(center - localCameraPosition) > maxDistance) continue;
+    }
+    if (!localFrustum.intersectsBox(section.min, section.max)) continue;
+
+    bindVertexArray(section.vao);
+    drawElements(lines ? GL_LINES : GL_TRIANGLES, section.indexCount, GL_UNSIGNED_INT, nullptr);
+    if (!lines) triangles += section.indexCount / 3;
+    ++sectionCount;
+  }
+}
+
+void SchematicRenderer::draw(const render::Mat4 &mvp, const render::Vec3 &cameraRelativeOrigin,
+                             float placementRotationDegrees, const DrawOptions &options,
+                             const render::Vec3 &localCameraPosition,
                              const render::Frustum &localFrustum,
-                             const std::vector<SectionBuffer> &sections) {
+                             const std::vector<SectionBuffer> &sections,
+                             const std::vector<SectionBuffer> &outlineSections) {
   mLastTriangles = 0;
   mLastSections = 0;
-  if (!mReady || sections.empty()) return;
+  if (!mReady) return;
+  if (sections.empty() && outlineSections.empty()) return;
   const Functions &g = resolve();
 
+  // Save everything touched, draw, restore. The restore runs even if nothing is drawn, so a frame
+  // with no visible sections cannot leave the game's state changed.
   SavedState saved;
   saveState(saved);
 
@@ -336,18 +513,14 @@ void SchematicRenderer::draw(const render::Mat4 &mvp, const render::Vec3 &placem
   auto colorMask = reinterpret_cast<void (*)(GLboolean, GLboolean, GLboolean, GLboolean)>(
       g.ColorMask);
   auto useProgram = reinterpret_cast<glUseProgram_t>(g.UseProgram);
-  auto uniformMatrix = reinterpret_cast<glUniformMatrix4fv_t>(g.UniformMatrix4fv);
   auto uniform1f = reinterpret_cast<glUniform1f_t>(g.Uniform1f);
   auto bindVertexArray = reinterpret_cast<glBindVertexArray_t>(g.BindVertexArray);
-  auto drawElements = reinterpret_cast<glDrawElements_t>(g.DrawElements);
-
-  useProgram(mProgram);
+  auto polygonOffset = reinterpret_cast<void (*)(GLfloat, GLfloat)>(g.PolygonOffset);
+  auto lineWidth = reinterpret_cast<void (*)(GLfloat)>(g.LineWidth);
 
   // Depth test stays ON so real terrain occludes the ghost blocks (the whole point of item 5).
   enable(GL_DEPTH_TEST);
   depthFunc(GL_LEQUAL);
-  // Translucent draws must not write depth, or they hide each other; outlines/mismatch do write it.
-  depthMask(mode == DrawMode::Translucent ? GL_FALSE : GL_TRUE);
   enable(GL_CULL_FACE);
   cullFace(kBack);
   frontFace(kCcw);
@@ -359,52 +532,79 @@ void SchematicRenderer::draw(const render::Mat4 &mvp, const render::Vec3 &placem
   if (colorMask) colorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   // A non-default blend equation would make a translucent draw come out wrong; force the default.
   if (blendEquation) blendEquation(GL_FUNC_ADD, GL_FUNC_ADD);
-  if (mode == DrawMode::Translucent || mode == DrawMode::Mismatch) {
+
+  const bool outlineOnly = options.mode == DrawMode::Outlines;
+
+  // Pass 1: filled ghost faces (translucent/mismatch), unless this is the outline-only mode.
+  if (!outlineOnly && !sections.empty()) {
+    useProgram(mProgram);
+    // Translucent draws must not write depth, or they hide each other; mismatch does write it.
+    depthMask(options.mode == DrawMode::Translucent ? GL_FALSE : GL_TRUE);
+    if (options.mode == DrawMode::Translucent || options.mode == DrawMode::Mismatch) {
+      enable(GL_BLEND);
+      if (blendFunc) {
+        blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+      }
+    } else {
+      disable(GL_BLEND);
+    }
+    // Ghost faces coincide with real block faces; pull them toward the camera so they do not
+    // z-fight. Both the factor and units are configurable.
+    if (polygonOffset) {
+      enable(GL_POLYGON_OFFSET_FILL);
+      polygonOffset(options.polygonOffsetFactor, options.polygonOffsetUnits);
+    }
+    setPlacementUniforms(mProgram, mvp, cameraRelativeOrigin, placementRotationDegrees);
+    if (mUniformAlpha >= 0) uniform1f(mUniformAlpha, options.alpha);
+    drawSectionList(g, mProgram, mUniformAlpha, options.alpha, sections, localCameraPosition,
+                    options.maxDistance, localFrustum, false, mLastTriangles, mLastSections);
+    if (polygonOffset) {
+      disable(GL_POLYGON_OFFSET_FILL);
+      polygonOffset(0.0f, 0.0f);
+    }
+  }
+
+  // Pass 2: block-edge outlines (B8), when enabled or in the outline-only mode.
+  if ((options.outlines || outlineOnly) && !outlineSections.empty()) {
+    useProgram(mLineProgram);
+    depthMask(GL_FALSE); // lines must not write depth either
     enable(GL_BLEND);
     if (blendFunc) {
       blendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     }
-  } else {
-    disable(GL_BLEND);
-  }
-
-  // No textures are bound by this program, but a stray binding would be sampled by the game's next
-  // draw, so it is restored by restoreState regardless.
-
-  // `mvp` is the plain world->clip matrix: the shader applies the placement transform itself.
-  uniformMatrix(mUniformMvp, 1, GL_FALSE, mvp.m);
-  uniform1f(mUniformAlpha, alpha);
-
-  const float yawRadians = placementRotationDegrees * 3.14159265358979f / 180.0f;
-  // The yaw is passed as pre-computed sin/cos so the shader avoids a trig call per vertex. The
-  // locations were resolved once at init.
-  auto uniform3f = reinterpret_cast<void (*)(GLint, GLfloat, GLfloat, GLfloat)>(g.Uniform3f);
-  if (uniform3f && mUniformPlacementOrigin >= 0) {
-    uniform3f(mUniformPlacementOrigin, placementOrigin.x, placementOrigin.y, placementOrigin.z);
-  }
-  if (mUniformPlacementYawCos >= 0) uniform1f(mUniformPlacementYawCos, std::cos(yawRadians));
-  if (mUniformPlacementYawSin >= 0) uniform1f(mUniformPlacementYawSin, std::sin(yawRadians));
-
-  for (const SectionBuffer &section : sections) {
-    if (!section.uploaded || section.indexCount == 0) continue;
-    // Both culls run in placement-local space, where a section's box is axis-aligned regardless of
-    // the placement's rotation. The camera was transformed into this space by the caller.
-    if (maxDistance > 0.0f) {
-      const render::Vec3 center{(section.min.x + section.max.x) * 0.5f,
-                                (section.min.y + section.max.y) * 0.5f,
-                                (section.min.z + section.max.z) * 0.5f};
-      if (render::length(center - localCameraPosition) > maxDistance) continue;
+    // A smaller offset than the faces, so the lines sit just in front without poking through.
+    if (polygonOffset) {
+      enable(GL_POLYGON_OFFSET_FILL);
+      polygonOffset(options.polygonOffsetFactor * 0.5f, options.polygonOffsetUnits * 0.5f);
     }
-    if (!localFrustum.intersectsBox(section.min, section.max)) continue;
-
-    bindVertexArray(section.vao);
-    drawElements(GL_TRIANGLES, section.indexCount, GL_UNSIGNED_INT, nullptr);
-    mLastTriangles += section.indexCount / 3;
-    ++mLastSections;
+    if (lineWidth) lineWidth(options.outlineWidth);
+    setPlacementUniforms(mLineProgram, mvp, cameraRelativeOrigin, placementRotationDegrees);
+    // `drawSectionList` sets uAlpha on whichever program is bound; the line program has its own.
+    drawSectionList(g, mLineProgram, mLineUniformAlpha, options.alpha, outlineSections,
+                    localCameraPosition, options.maxDistance, localFrustum, true, mLastTriangles,
+                    mLastSections);
+    if (polygonOffset) {
+      disable(GL_POLYGON_OFFSET_FILL);
+      polygonOffset(0.0f, 0.0f);
+    }
   }
 
   bindVertexArray(0);
   restoreState(saved);
+}
+
+void SchematicRenderer::drawOutlines(const render::Mat4 &mvp,
+                                     const render::Vec3 &cameraRelativeOrigin,
+                                     float placementRotationDegrees, const DrawOptions &options,
+                                     const render::Vec3 &localCameraPosition,
+                                     const render::Frustum &localFrustum,
+                                     const std::vector<SectionBuffer> &outlineSections) {
+  // The outline-only render mode: the same pass as `draw`'s outline stage, without the fill.
+  DrawOptions outlineOptions = options;
+  outlineOptions.mode = DrawMode::Outlines;
+  outlineOptions.outlines = true;
+  draw(mvp, cameraRelativeOrigin, placementRotationDegrees, outlineOptions, localCameraPosition,
+       localFrustum, {}, outlineSections);
 }
 
 } // namespace bitematica::gles

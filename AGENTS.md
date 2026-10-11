@@ -138,11 +138,24 @@ src/render/HudOverlay.cpp src/mod/ControllerNavigator.cpp src/mod/JsonConfig.cpp
   GlowberryClient's pin must be at or after it. See `docs/BUMP_PRELOADER.md`. The SDK's
   `viewProjection` is **world→clip** (documented in `docs/MATRIX_SPACE.md`) — do not treat it as
   camera-relative.
-- **`uMvp` must be the plain world->clip matrix.** The vertex shader applies the placement's yaw
-  and origin itself, so `draw()` takes the world `mvp` and the placement-local frustum/camera
-  separately (`render::computePlacementCull`). Passing `viewProjection * localToWorld` as `uMvp`
-  transforms every vertex twice — `testPlacementCullMvpExcludesPlacementTransform` fails if that
-  creeps back in.
+- **`uMvp` is the camera-relative clip matrix, and the placement transform is applied exactly once.**
+  `render::computePlacementCull(projection, view, ...)` returns `mvp = projection * rotation(view)`
+  and `cameraRelativeOrigin = placementOrigin − cameraPosition` (subtracted in **double** precision,
+  then narrowed to float). The vertex shader applies the placement's yaw and that relative origin
+  itself, so no large world offset ever enters a float and the ghost is stable at ±3e7. Passing the
+  world `viewProjection * localToWorld` (or folding the placement transform into `mvp`) transforms
+  every vertex twice — `testCameraRelativeMvpExcludesPlacementTransform` fails if that creeps back in.
+- **Meshing and outlines run on the worker, not the render thread.** `SectionMesher::build` and
+  `SectionMesher::buildOutlines` produce geometry; the render callback only uploads buffers and
+  draws. Outlines are block-edge `GL_LINES` (surface blocks only), a second tiny program
+  (`mLineProgram`), with a smaller polygon offset than the fill pass. Fill uses
+  `glPolygonOffset(factor, units)` (negative, configurable) so ghost faces do not z-fight real ones.
+- **The GL backend is gated on `gles::isGles3OrLater(GL_VERSION)`.** On a non-GLES-3 (e.g. Vulkan)
+  backend `initialize()` returns false, the mod records a one-time named reason and draws nothing.
+  The predicate is header-only and unit-tested in `host_tests_render.cpp`.
+- **GL resources are freed on the render thread.** `disable()`/`unload()` set `mGlShutdownRequested`;
+  the next render frame calls `releaseGlResources()` (buffers + programs) with the context current,
+  then unregisters the callbacks. Never free GL objects off the render thread.
 - **The camera comes from `LocalPlayerFeed`, not a matrix scan.** It hooks `ClientInstance`'s
   local-player slot 31 **by RTTI name** and reads `Actor+0x230` (position) / `+0x238` (yaw,pitch),
   the same offsets the launcher's own feed uses; they are shared by 1.26.33 / 1.26.50 / 1.26.51.

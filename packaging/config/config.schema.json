@@ -75,6 +75,32 @@
     "layerSingle": { "title": "Single Layer", "type": "integer", "minimum": 0 },
     "layerMin": { "title": "Range Start", "type": "integer", "minimum": 0 },
     "layerMax": { "title": "Range End", "type": "integer", "minimum": 0 },
+    "showOutlines": {
+      "title": "Block Outlines",
+      "description": "Draw the block-edge outline over the ghost blocks.",
+      "type": "boolean"
+    },
+    "outlineWidth": {
+      "title": "Outline Width",
+      "description": "Outline line width in pixels (0.5-8; the driver may clamp it).",
+      "type": "number",
+      "minimum": 0.5,
+      "maximum": 8.0
+    },
+    "polygonOffsetFactor": {
+      "title": "Polygon Offset Factor",
+      "description": "Depth-bias factor for the ghost faces, to stop z-fighting with real blocks. Negative pulls the ghost toward the camera (-8 to 0).",
+      "type": "number",
+      "minimum": -8.0,
+      "maximum": 0.0
+    },
+    "polygonOffsetUnits": {
+      "title": "Polygon Offset Units",
+      "description": "Depth-bias units for the ghost faces (-16 to 0).",
+      "type": "number",
+      "minimum": -16.0,
+      "maximum": 0.0
+    },
     "verifyAgainstWorld": {
       "title": "Verify Against World",
       "description": "Colour blocks by whether the live world matches the schematic.",

@@ -102,6 +102,12 @@ private:
       applyToggle(key, value, config);
       return true;
     }
+    // A '.' or exponent marks a float (the polygon-offset and outline-width fields).
+    if (token.find('.') != std::string::npos || token.find('e') != std::string::npos ||
+        token.find('E') != std::string::npos) {
+      applyFloat(key, static_cast<float>(std::strtod(token.c_str(), nullptr)), config);
+      return true;
+    }
     const long number = std::strtol(token.c_str(), nullptr, 10);
     applyNumber(key, static_cast<int>(number), config);
     return true;
@@ -113,8 +119,15 @@ private:
     else if (key == "showToolbar") config.showToolbar = value;
     else if (key == "ghostPlacement") config.ghostPlacement = value;
     else if (key == "onlyExposed") config.onlyExposed = value;
+    else if (key == "showOutlines") config.showOutlines = value;
     else if (key == "verifyAgainstWorld") config.verifyAgainstWorld = value;
     else if (key == "verifyExtras") config.verifyExtras = value;
+  }
+
+  static void applyFloat(const std::string &key, float value, Config &config) {
+    if (key == "outlineWidth") config.outlineWidth = value;
+    else if (key == "polygonOffsetFactor") config.polygonOffsetFactor = value;
+    else if (key == "polygonOffsetUnits") config.polygonOffsetUnits = value;
   }
 
   static void applyNumber(const std::string &key, int value, Config &config) {
@@ -194,6 +207,10 @@ std::string JsonConfig::serialize(const Config &config) {
   out += "  \"layerSingle\": " + std::to_string(config.layerSingle) + ",\n";
   out += "  \"layerMin\": " + std::to_string(config.layerMin) + ",\n";
   out += "  \"layerMax\": " + std::to_string(config.layerMax) + ",\n";
+  out += "  \"showOutlines\": " + boolean(config.showOutlines) + ",\n";
+  out += "  \"outlineWidth\": " + std::to_string(config.outlineWidth) + ",\n";
+  out += "  \"polygonOffsetFactor\": " + std::to_string(config.polygonOffsetFactor) + ",\n";
+  out += "  \"polygonOffsetUnits\": " + std::to_string(config.polygonOffsetUnits) + ",\n";
   out += "  \"verifyAgainstWorld\": " + boolean(config.verifyAgainstWorld) + ",\n";
   out += "  \"verifyExtras\": " + boolean(config.verifyExtras) + ",\n";
   out += "  \"verifyBlockSourceSlot\": " + std::to_string(config.verifyBlockSourceSlot) + ",\n";
