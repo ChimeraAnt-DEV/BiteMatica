@@ -65,8 +65,11 @@
 #include "gles/SchematicRenderer.hpp"
 #include "litematica/BlockTargeting.hpp"
 #include "litematica/PasteJob.hpp"
+#include "litematica/PlacementEdit.hpp"
 #include "litematica/PlacementManager.hpp"
+#include "litematica/PlacementStore.hpp"
 #include "litematica/ToolMode.hpp"
+#include "translate/BlockStateTransform.hpp"
 #include "mesh/SectionMesher.hpp"
 #include "ui/MenuBuilder.hpp"
 #include "ui/MenuModel.hpp"
@@ -212,6 +215,9 @@ private:
   void exportStructure();
   void exportCsv();
   void saveLitematic();
+  /// Loads/saves the placement list from/to `placements.json` (D1).
+  void loadPlacements();
+  void savePlacements();
   void applyTool();
   void runVerification();
   void moveToPlayer();
@@ -369,6 +375,7 @@ bool BiteMaticaMod::load() {
   mConfig.normalize();
 
   scanLibrary();
+  loadPlacements();
   if (!mFiles.empty()) {
     mFileIndex = 0;
     loadCurrentSchematic();
@@ -888,14 +895,18 @@ bool BiteMaticaMod::performAction(bitematica::render::ToolbarButton::Action acti
       saveConfig();
       return true;
     case Action::RotateLeft:
+      mPlacements.pushUndo();
       mPlacement.rotateCcw();
       rebuildMeshAsync();
+      savePlacements();
       refreshStatusLine();
       return true;
     case Action::RotateRight:
     case Action::RotatePlacement:
+      mPlacements.pushUndo();
       mPlacement.rotateCw();
       rebuildMeshAsync();
+      savePlacements();
       refreshStatusLine();
       return true;
     case Action::ZoomIn:
@@ -909,11 +920,15 @@ bool BiteMaticaMod::performAction(bitematica::render::ToolbarButton::Action acti
       refreshStatusLine();
       return true;
     case Action::NudgeUp:
+      mPlacements.pushUndo();
       mPlacement.yOffset += 1;
+      savePlacements();
       refreshStatusLine();
       return true;
     case Action::NudgeDown:
+      mPlacements.pushUndo();
       mPlacement.yOffset -= 1;
+      savePlacements();
       refreshStatusLine();
       return true;
     case Action::ToggleGhost:
@@ -949,8 +964,10 @@ bool BiteMaticaMod::performAction(bitematica::render::ToolbarButton::Action acti
       rebuildMeshAsync();
       return true;
     case Action::CycleMirror:
+      mPlacements.pushUndo();
       mPlacement.cycleMirror();
       rebuildMeshAsync();
+      savePlacements();
       refreshStatusLine();
       return true;
     case Action::SaveLitematic:
@@ -989,6 +1006,61 @@ bool BiteMaticaMod::performAction(bitematica::render::ToolbarButton::Action acti
 }
 
 // --- loading -------------------------------------------------------------------------
+
+void BiteMaticaMod::loadPlacements() {
+  if (mSelf == nullptr) return;
+  const std::filesystem::path path = mSelf->getDataDir() / "placements.json";
+  std::vector<bitematica::litematica::PlacedSchematic> loaded;
+  std::string error;
+  if (!bitematica::litematica::PlacementStore::readFile(path.string(), loaded, error)) {
+    // No file yet is normal on a first run; a corrupt file is worth a log line.
+    if (std::filesystem::exists(path)) {
+      mSelf->getLogger().warn("BiteMatica: placements not loaded: {}", error);
+    }
+    return;
+  }
+  // Resolve each placement's schematic from its id. A placement whose file is gone is kept but left
+  // with a null schematic, so the placement list shows it as "(missing)" rather than dropping it.
+  for (auto &placement : loaded) {
+    if (placement.schematicId.empty()) continue;
+    const bitematica::format::LoadResult result =
+        bitematica::format::SchematicFormat::readPath(placement.schematicId);
+    if (result.success) {
+      placement.schematic = std::make_shared<const Schematic>(std::move(result.schematic));
+    } else if (mSelf != nullptr) {
+      mSelf->getLogger().warn("BiteMatica: placement schematic {} could not be re-read: {}",
+                             placement.schematicId, result.error);
+    }
+  }
+  for (auto &placement : loaded) mPlacements.add(placement.schematic, placement.placement);
+  // Restore the per-placement settings the `add` path does not carry.
+  for (size_t i = 0; i < loaded.size(); ++i) {
+    if (auto *entry = mPlacements.at(static_cast<int>(i))) {
+      entry->schematicId = loaded[i].schematicId;
+      entry->displayName = loaded[i].displayName;
+      entry->visible = loaded[i].visible;
+      entry->locked = loaded[i].locked;
+      entry->layerMode = loaded[i].layerMode;
+      entry->layerAxis = loaded[i].layerAxis;
+      entry->layerMin = loaded[i].layerMin;
+      entry->layerMax = loaded[i].layerMax;
+      entry->opacity = loaded[i].opacity;
+      entry->showOutlines = loaded[i].showOutlines;
+    }
+  }
+  if (!loaded.empty() && mSelf != nullptr) {
+    mSelf->getLogger().info("BiteMatica: restored {} placement(s)", loaded.size());
+  }
+}
+
+void BiteMaticaMod::savePlacements() {
+  if (mSelf == nullptr) return;
+  const std::filesystem::path path = mSelf->getDataDir() / "placements.json";
+  std::string error;
+  if (!bitematica::litematica::PlacementStore::writeFile(path.string(), mPlacements.all(), error)) {
+    mSelf->getLogger().warn("BiteMatica: placements not saved: {}", error);
+  }
+}
 
 void BiteMaticaMod::scanLibrary() {
   const std::filesystem::path dir = mSelf->getModDir() / "schematics";
@@ -1029,6 +1101,7 @@ void BiteMaticaMod::loadCurrentSchematic() {
 }
 
 void BiteMaticaMod::moveToPlayer() {
+  mPlacements.pushUndo();
   float position[3] = {0.0f, 0.0f, 0.0f};
   if (bitematica::mod::SdkRender::readLocalPlayerPosition(position)) {
     mPlayerPosition = {position[0], position[1], position[2]};

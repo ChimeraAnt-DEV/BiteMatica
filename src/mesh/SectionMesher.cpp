@@ -65,12 +65,35 @@ uint32_t shade(uint32_t argb, float factor) {
   return static_cast<uint32_t>((a << 24) | (r << 16) | (g << 8) | b);
 }
 
+/// How the placement's mirror is applied to emitted geometry.
+///
+/// The shader applies the placement's yaw and origin but not its mirror, so the mirror must be baked
+/// into the mesh's local coordinates. A mirror is a reflection, which reverses handedness, so the
+/// triangle winding is flipped too — otherwise `glCullFace(GL_BACK)` would cull every mirrored face
+/// and the mirrored ghost would be invisible.
+struct MirrorTransform {
+  bool mirrorX{false};
+  bool mirrorZ{false};
+  float sizeX{1.0f};
+  float sizeZ{1.0f};
+
+  bool active() const { return mirrorX || mirrorZ; }
+
+  /// Applies the mirror to a global-local coordinate in place.
+  void apply(float xyz[3]) const {
+    if (mirrorX) xyz[0] = sizeX - xyz[0];
+    if (mirrorZ) xyz[2] = sizeZ - xyz[2];
+  }
+};
+
 /// Emits a quad on face plane `planeW` spanning `aLen` x `bLen` cells, in section-relative coords.
 ///
 /// The four corners are built in (a, b, n) space and wound consistently so a single
-/// `glCullFace(GL_BACK)` works.
+/// `glCullFace(GL_BACK)` works. When a mirror is active the corners are reflected and the winding is
+/// reversed, so the quad still faces outward after the reflection.
 void emitQuad(SectionMesh &mesh, const FaceDir &face, float planeW, int aStart, int bStart,
-              int aLen, int bLen, uint32_t color, float originX, float originY, float originZ) {
+              int aLen, int bLen, uint32_t color, float originX, float originY, float originZ,
+              const MirrorTransform &mirror) {
   // (a, b) corners of the rectangle.
   const float ab[4][2] = {
       {static_cast<float>(aStart), static_cast<float>(bStart)},
@@ -79,7 +102,7 @@ void emitQuad(SectionMesh &mesh, const FaceDir &face, float planeW, int aStart, 
       {static_cast<float>(aStart + aLen), static_cast<float>(bStart)},
   };
   // Reverse the winding for negative faces so the normal still points outward.
-  const int order[4] = {0, face.positive ? 1 : 3, 2, face.positive ? 3 : 1};
+  int order[4] = {0, face.positive ? 1 : 3, 2, face.positive ? 3 : 1};
 
   const uint32_t shaded = shade(color, face.shade);
   const uint32_t base = static_cast<uint32_t>(mesh.vertices.size());
@@ -89,6 +112,7 @@ void emitQuad(SectionMesh &mesh, const FaceDir &face, float planeW, int aStart, 
     xyz[face.a] = c[0];
     xyz[face.b] = c[1];
     xyz[face.n] = planeW;
+    mirror.apply(xyz);
     MeshVertex vertex;
     vertex.x = xyz[0] - originX;
     vertex.y = xyz[1] - originY;
@@ -97,8 +121,14 @@ void emitQuad(SectionMesh &mesh, const FaceDir &face, float planeW, int aStart, 
     vertex.face = face.face;
     mesh.vertices.push_back(vertex);
   }
-  mesh.triangles.push_back({base, base + 1, base + 2});
-  mesh.triangles.push_back({base, base + 2, base + 3});
+  // A reflection flips the winding; emit the reverse order so the face still culls correctly.
+  if (mirror.active()) {
+    mesh.triangles.push_back({base, base + 2, base + 1});
+    mesh.triangles.push_back({base, base + 3, base + 2});
+  } else {
+    mesh.triangles.push_back({base, base + 1, base + 2});
+    mesh.triangles.push_back({base, base + 2, base + 3});
+  }
 }
 
 /// Emits the six faces of one axis-aligned box, wound outward, in section-relative coordinates.
@@ -107,7 +137,7 @@ void emitQuad(SectionMesh &mesh, const FaceDir &face, float planeW, int aStart, 
 /// exposed-face cull does not apply — the boxes are small and the extra triangles are bounded by the
 /// shape table. Each face gets the directional shading the greedy path uses.
 void emitBox(SectionMesh &mesh, const core::ShapeBox &box, uint32_t color, float originX,
-             float originY, float originZ) {
+             float originY, float originZ, const MirrorTransform &mirror) {
   // (axis, positive) for the six faces, matching the shading tags in `kFaces`.
   struct FaceDef {
     int n;
@@ -119,8 +149,21 @@ void emitBox(SectionMesh &mesh, const core::ShapeBox &box, uint32_t color, float
       {1, true, 0, 1.00f}, {1, false, 2, 0.45f}, {0, true, 1, 0.72f},
       {0, false, 1, 0.72f}, {2, true, 1, 0.86f}, {2, false, 1, 0.86f},
   };
-  const float mn[3] = {box.minX, box.minY, box.minZ};
-  const float mx[3] = {box.maxX, box.maxY, box.maxZ};
+  float mn[3] = {box.minX, box.minY, box.minZ};
+  float mx[3] = {box.maxX, box.maxY, box.maxZ};
+  // Bake the mirror into the box: a reflection swaps the min and max on the mirrored axis.
+  if (mirror.mirrorX) {
+    const float lo = mirror.sizeX - mx[0];
+    const float hi = mirror.sizeX - mn[0];
+    mn[0] = lo;
+    mx[0] = hi;
+  }
+  if (mirror.mirrorZ) {
+    const float lo = mirror.sizeZ - mx[2];
+    const float hi = mirror.sizeZ - mn[2];
+    mn[2] = lo;
+    mx[2] = hi;
+  }
 
   for (const FaceDef &f : faces) {
     const float plane = f.positive ? mx[f.n] : mn[f.n];
@@ -149,8 +192,15 @@ void emitBox(SectionMesh &mesh, const core::ShapeBox &box, uint32_t color, float
       vertex.face = f.faceTag;
       mesh.vertices.push_back(vertex);
     }
-    mesh.triangles.push_back({base, base + 1, base + 2});
-    mesh.triangles.push_back({base, base + 2, base + 3});
+    // A mirror reflects the box (min/max swapped above), which flips the winding; reverse it so the
+    // face still culls correctly.
+    if (mirror.active()) {
+      mesh.triangles.push_back({base, base + 2, base + 1});
+      mesh.triangles.push_back({base, base + 3, base + 2});
+    } else {
+      mesh.triangles.push_back({base, base + 1, base + 2});
+      mesh.triangles.push_back({base, base + 2, base + 3});
+    }
   }
 }
 
@@ -159,7 +209,9 @@ void emitBox(SectionMesh &mesh, const core::ShapeBox &box, uint32_t color, float
 SectionMesh SectionMesher::buildSection(const Schematic &schematic,
                                         const world::Placement &placement, int sectionX,
                                         int sectionY, int sectionZ, int layerMin, int layerMax) {
-  (void)placement; // geometry is built in local space; the placement is applied at draw time.
+  // The placement's rotation is applied by the shader at draw time, but its **mirror is not**: it is
+  // baked into the local coordinates here, because a reflection reverses triangle winding and the
+  // shader has no way to express that. See `MirrorTransform`.
   SectionMesh mesh;
   mesh.sectionX = sectionX;
   mesh.sectionY = sectionY;
@@ -172,6 +224,12 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
   const int sizeY = schematic.sizeY();
   const int sizeZ = schematic.sizeZ();
   if (sizeX <= 0 || sizeY <= 0 || sizeZ <= 0) return mesh;
+
+  MirrorTransform mirror;
+  mirror.mirrorX = placement.mirror == world::Mirror::X;
+  mirror.mirrorZ = placement.mirror == world::Mirror::Z;
+  mirror.sizeX = static_cast<float>(sizeX);
+  mirror.sizeZ = static_cast<float>(sizeZ);
 
   // Non-cube blocks are meshed from their shape table, not the greedy full-cube path. They are
   // collected here and emitted after the greedy pass, so a slab or stair reads as its own shape
@@ -274,7 +332,7 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
 
           const float planeW = static_cast<float>(w) + (face.positive ? 1.0f : 0.0f);
           emitQuad(mesh, face, planeW, a, b, width, height, cell.color, mesh.originX,
-                   mesh.originY, mesh.originZ);
+                   mesh.originY, mesh.originZ, mirror);
 
           for (int dv = 0; dv < height; ++dv) {
             for (int du = 0; du < width; ++du) {
@@ -296,7 +354,7 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
                      box.minZ + static_cast<float>(block.z),
                      box.maxX + static_cast<float>(block.x), box.maxY + static_cast<float>(block.y),
                      box.maxZ + static_cast<float>(block.z)},
-              block.color, mesh.originX, mesh.originY, mesh.originZ);
+              block.color, mesh.originX, mesh.originY, mesh.originZ, mirror);
     }
   }
 
