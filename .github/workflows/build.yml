@@ -89,13 +89,25 @@ jobs:
           with zipfile.ZipFile(package) as archive:
               names = sorted(archive.namelist())
           print("\n".join(names))
-          required = ["egg.json", "bin/libbitematica.so", "config/config.json",
-                      "config/config.schema.json"]
+          required = ["egg.json", "manifest.json", "bin/libbitematica.so",
+                      "config/config.json", "config/config.schema.json"]
           for entry in required:
               if entry not in names:
                   sys.exit("missing required entry: " + entry)
           if not any(n.startswith("schematics/") for n in names):
               sys.exit("no schematic shipped in the package")
+
+          # The preloader reads manifest.json at the extracted mod root and refuses
+          # to load unless it is preload-native and its entry exists in the package.
+          import json
+          manifest = json.loads(archive.read("manifest.json"))
+          if manifest.get("type") != "preload-native":
+              sys.exit("manifest.json is not type preload-native")
+          if manifest.get("entry") not in names:
+              sys.exit("manifest.json entry is not in the package: "
+                       + str(manifest.get("entry")))
+          if manifest.get("icon") and manifest["icon"] not in names:
+              sys.exit("manifest.json icon is not in the package")
           print("package layout OK")
           PY
 

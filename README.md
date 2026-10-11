@@ -99,11 +99,13 @@ BiteMatica is a **GlowberryClient `.AntEgg` mod**. It needs [GlowberryClient](ht
 4. Put your schematics in the mod's `schematics/` folder (created on first load; the path is the mod's own directory under `AntEggs/bitematica/schematics/`). A demo hut ships in the package so you see something immediately.
 5. Press **R** in the toolbar after adding files.
 
-> **Package layout** — an `.AntEgg` is a ZIP with the `.antegg` extension:
+> **Package layout** — an `.AntEgg` is a ZIP with the `.antegg` extension. A native mod needs **both** manifests: `egg.json` is what `.AntEgg` validation reads, and `manifest.json` is what the preloader reads at the extracted mod root — it refuses to load a library unless that manifest is present, is `type: "preload-native"`, and names an entry that exists inside the package.
 > ```
-> BiteMatica-1.0.0.antegg
-> ├── egg.json                     manifest (name/version/author/type/entry_point)
+> BiteMatica-1.0.1.antegg
+> ├── egg.json                     .AntEgg manifest (name/version/author/type/entry_point)
+> ├── manifest.json                preloader manifest (type: preload-native, entry, icon)
 > ├── bin/libbitematica.so         the arm64-v8a native mod
+> ├── icon.png                     mod icon shown by the launcher
 > ├── config/config.json           default settings
 > ├── config/config.schema.json    schema for the launcher's config editor
 > └── schematics/demo_house.litematic
