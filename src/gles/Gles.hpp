@@ -49,6 +49,7 @@ inline constexpr GLenum GL_DEPTH_FUNC = 0x0B74;
 inline constexpr GLenum GL_CULL_FACE_MODE = 0x0B45;
 inline constexpr GLenum GL_FRONT_FACE = 0x0B46;
 inline constexpr GLenum GL_ACTIVE_TEXTURE = 0x84E0;
+inline constexpr GLenum GL_FUNC_ADD = 0x8006;
 inline constexpr GLenum GL_STENCIL_TEST = 0x0B90;
 inline constexpr GLenum GL_SCISSOR_TEST = 0x0C11;
 inline constexpr GLenum GL_COLOR_WRITEMASK = 0x0C23;
