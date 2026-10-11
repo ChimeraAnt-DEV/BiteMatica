@@ -21,7 +21,8 @@ namespace bitematica::mod {
 class ControllerNavigator {
 public:
   static constexpr int kColumns = 6;
-  static constexpr int kRowCount = 2;
+  static constexpr int kRowCount = 4;
+  static constexpr int kButtonCount = 19;
 
   /// Android key codes the navigator understands.
   enum Key {

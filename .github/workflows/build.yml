@@ -68,10 +68,13 @@ jobs:
         run: cmake -S . -B build/host -DCMAKE_BUILD_TYPE=Release
 
       - name: Build host tests
-        run: cmake --build build/host --target bitematica_tests --parallel
+        run: cmake --build build/host --target bitematica_tests bitematica_world_tests --parallel
 
-      - name: Run host tests
+      - name: Run host tests (formats, mesh, UI)
         run: ./build/host/bitematica_tests
+
+      - name: Run host tests (world space - placement, mesher, verification, translation)
+        run: ./build/host/bitematica_world_tests
 
       - name: Build and package .AntEgg
         run: |

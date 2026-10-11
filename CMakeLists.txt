@@ -22,13 +22,23 @@ set(BITEMATICA_CORE_SOURCES
     src/nbt/NbtWriter.cpp
     src/format/SchematicFormat.cpp
     src/format/LitematicReader.cpp
+    src/format/LitematicWriter.cpp
     src/format/SpongeReader.cpp
     src/format/McEditReader.cpp
     src/format/BedrockStructureReader.cpp
     src/format/StructureWriter.cpp
     src/render/HudOverlay.cpp
     src/mod/ControllerNavigator.cpp
-    src/mod/JsonConfig.cpp)
+    src/mod/JsonConfig.cpp
+    # World-space layer: placement, mesher, verification, translation. All pure and
+    # host-testable; the GLES renderer and the mod glue are Android-only.
+    src/mesh/SectionMesher.cpp
+    src/world/Verifier.cpp
+    src/world/WorldSource.cpp
+    src/world/Selection.cpp
+    src/world/CheatPlacement.cpp
+    src/translate/BlockTranslation.cpp
+    src/core/LiveMaterials.cpp)
 
 add_library(bitematica_core STATIC ${BITEMATICA_CORE_SOURCES})
 target_include_directories(bitematica_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -87,9 +97,19 @@ if(ANDROID)
     FetchContent_MakeAvailable(fmt)
   endif()
 
-  add_library(bitematica SHARED src/mod/BiteMaticaMod.cpp)
+  # Android-only sources: the GLES renderer, the live-world block source and the preloader glue.
+  add_library(bitematica SHARED
+      src/mod/BiteMaticaMod.cpp
+      src/mod/GameWorldSource.cpp
+      src/gles/Gles.cpp
+      src/gles/SchematicRenderer.cpp)
   target_include_directories(bitematica PRIVATE "${PRELOADER_ANDROID_ROOT}/include")
   target_link_libraries(bitematica PRIVATE bitematica_core fmt::fmt ${ANDROID_LOG_LIB})
+  # The GLES entry points are resolved with dlopen/dlsym at runtime, never linked.
+  find_library(ANDROID_DL_LIB dl)
+  if(ANDROID_DL_LIB)
+    target_link_libraries(bitematica PRIVATE ${ANDROID_DL_LIB})
+  endif()
   target_compile_options(bitematica PRIVATE
       $<$<COMPILE_LANG_AND_ID:CXX,Clang,GNU>:
         -Wall -Wextra -Wpedantic -fvisibility=hidden -fvisibility-inlines-hidden>)
@@ -124,4 +144,25 @@ if(NOT ANDROID)
   target_compile_definitions(bitematica_tests PRIVATE
       BITEMATICA_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   add_test(NAME bitematica_tests COMMAND bitematica_tests)
+
+  add_executable(bitematica_world_tests test/host_tests_world.cpp)
+  target_link_libraries(bitematica_world_tests PRIVATE bitematica_core)
+  target_compile_definitions(bitematica_world_tests PRIVATE
+      BITEMATICA_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+  add_test(NAME bitematica_world_tests COMMAND bitematica_world_tests)
+
+  # A syntax-only check of the Android glue against stubbed Android/fmt headers. It compiles the
+  # preloader-dependent translation units so a type error in the GLES renderer or the mod glue is
+  # caught on a host, without an NDK. No binary is produced.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/stubs/jni.h")
+    add_library(bitematica_android_syntax OBJECT
+        src/mod/GameWorldSource.cpp
+        src/gles/Gles.cpp
+        src/gles/SchematicRenderer.cpp)
+    target_include_directories(bitematica_android_syntax PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/stubs"
+        "${PRELOADER_ANDROID_ROOT}/include")
+    target_link_libraries(bitematica_android_syntax PRIVATE bitematica_core)
+  endif()
 endif()
