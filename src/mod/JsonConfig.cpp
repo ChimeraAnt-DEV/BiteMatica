@@ -83,6 +83,7 @@ private:
       std::string value;
       if (!readString(value)) return false;
       if (key == "lastLoadedFile") config.lastLoadedFile = value;
+      else if (key == "verifyGameVersionTag") config.verifyGameVersionTag = value;
       return true;
     }
     // Number or boolean literal.
@@ -102,6 +103,12 @@ private:
       applyToggle(key, value, config);
       return true;
     }
+    // A '.' or exponent marks a float (the polygon-offset and outline-width fields).
+    if (token.find('.') != std::string::npos || token.find('e') != std::string::npos ||
+        token.find('E') != std::string::npos) {
+      applyFloat(key, static_cast<float>(std::strtod(token.c_str(), nullptr)), config);
+      return true;
+    }
     const long number = std::strtol(token.c_str(), nullptr, 10);
     applyNumber(key, static_cast<int>(number), config);
     return true;
@@ -113,8 +120,19 @@ private:
     else if (key == "showToolbar") config.showToolbar = value;
     else if (key == "ghostPlacement") config.ghostPlacement = value;
     else if (key == "onlyExposed") config.onlyExposed = value;
+    else if (key == "showOutlines") config.showOutlines = value;
     else if (key == "verifyAgainstWorld") config.verifyAgainstWorld = value;
     else if (key == "verifyExtras") config.verifyExtras = value;
+    else if (key == "panicHidden") config.panicHidden = value;
+    else if (key == "highContrast") config.highContrast = value;
+  }
+
+  static void applyFloat(const std::string &key, float value, Config &config) {
+    if (key == "outlineWidth") config.outlineWidth = value;
+    else if (key == "polygonOffsetFactor") config.polygonOffsetFactor = value;
+    else if (key == "polygonOffsetUnits") config.polygonOffsetUnits = value;
+    else if (key == "uiScale") config.uiScale = value;
+    else if (key == "textScale") config.textScale = value;
   }
 
   static void applyNumber(const std::string &key, int value, Config &config) {
@@ -134,6 +152,11 @@ private:
     else if (key == "materialX") config.materialX = value;
     else if (key == "materialY") config.materialY = value;
     else if (key == "maxRenderDistance") config.maxRenderDistance = value;
+    else if (key == "verifyMismatchMode") config.verifyMismatchMode = value;
+    else if (key == "verifyBlocksPerFrame") config.verifyBlocksPerFrame = value;
+    else if (key == "palettePreset") config.palettePreset = value;
+    else if (key == "maxSchematicBlocks") config.maxSchematicBlocks = value;
+    else if (key == "uploadSectionsPerFrame") config.uploadSectionsPerFrame = value;
   }
 
   const std::string &mText;
@@ -190,13 +213,27 @@ std::string JsonConfig::serialize(const Config &config) {
   out += "  \"maxRenderBlocks\": " + std::to_string(config.maxRenderBlocks) + ",\n";
   out += "  \"maxTriangles\": " + std::to_string(config.maxTriangles) + ",\n";
   out += "  \"renderDistance\": " + std::to_string(config.renderDistance) + ",\n";
+  out += "  \"maxSchematicBlocks\": " + std::to_string(config.maxSchematicBlocks) + ",\n";
+  out += "  \"uploadSectionsPerFrame\": " + std::to_string(config.uploadSectionsPerFrame) + ",\n";
   out += "  \"layerMode\": " + std::to_string(static_cast<int>(config.layerMode)) + ",\n";
   out += "  \"layerSingle\": " + std::to_string(config.layerSingle) + ",\n";
   out += "  \"layerMin\": " + std::to_string(config.layerMin) + ",\n";
   out += "  \"layerMax\": " + std::to_string(config.layerMax) + ",\n";
+  out += "  \"showOutlines\": " + boolean(config.showOutlines) + ",\n";
+  out += "  \"outlineWidth\": " + std::to_string(config.outlineWidth) + ",\n";
+  out += "  \"polygonOffsetFactor\": " + std::to_string(config.polygonOffsetFactor) + ",\n";
+  out += "  \"polygonOffsetUnits\": " + std::to_string(config.polygonOffsetUnits) + ",\n";
   out += "  \"verifyAgainstWorld\": " + boolean(config.verifyAgainstWorld) + ",\n";
   out += "  \"verifyExtras\": " + boolean(config.verifyExtras) + ",\n";
+  out += "  \"verifyMismatchMode\": " + std::to_string(config.verifyMismatchMode) + ",\n";
+  out += "  \"verifyBlocksPerFrame\": " + std::to_string(config.verifyBlocksPerFrame) + ",\n";
   out += "  \"verifyBlockSourceSlot\": " + std::to_string(config.verifyBlockSourceSlot) + ",\n";
+  out += "  \"verifyGameVersionTag\": \"" + escape(config.verifyGameVersionTag) + "\",\n";
+  out += "  \"panicHidden\": " + boolean(config.panicHidden) + ",\n";
+  out += "  \"uiScale\": " + std::to_string(config.uiScale) + ",\n";
+  out += "  \"textScale\": " + std::to_string(config.textScale) + ",\n";
+  out += "  \"highContrast\": " + boolean(config.highContrast) + ",\n";
+  out += "  \"palettePreset\": " + std::to_string(config.palettePreset) + ",\n";
   out += "  \"toolbarX\": " + std::to_string(config.toolbarX) + ",\n";
   out += "  \"toolbarY\": " + std::to_string(config.toolbarY) + ",\n";
   out += "  \"materialX\": " + std::to_string(config.materialX) + ",\n";

@@ -18,12 +18,16 @@
 #include "format/LitematicWriter.hpp"
 #include "format/SchematicFormat.hpp"
 #include "mesh/SectionMesher.hpp"
+#include "nbt/NbtReader.hpp"
+#include "nbt/NbtWriter.hpp"
 #include "render/MathTypes.hpp"
 #include "render/PlacementCull.hpp"
 #include "translate/BlockTranslation.hpp"
 #include "world/CheatPlacement.hpp"
 #include "world/Placement.hpp"
 #include "world/Selection.hpp"
+#include "mod/GameWorldSource.hpp"
+#include "world/IncrementalVerifier.hpp"
 #include "world/Verifier.hpp"
 #include "world/WorldSource.hpp"
 
@@ -48,7 +52,11 @@ std::string fixture(const std::string &name) {
 class FakeWorld : public bitematica::world::WorldSource {
 public:
   void set(const bitematica::core::BlockPos &pos, const std::string &name) {
-    mBlocks[key(pos)] = name;
+    set(pos, name, {});
+  }
+  void set(const bitematica::core::BlockPos &pos, const std::string &name,
+           const std::vector<std::pair<std::string, std::string>> &states) {
+    mBlocks[key(pos)] = bitematica::core::BlockState{name, states};
   }
   bool readBlock(const bitematica::core::BlockPos &position,
                  bitematica::core::BlockState &out) override {
@@ -57,8 +65,7 @@ public:
       out = bitematica::core::BlockState{};
       return true; // air
     }
-    out.name = it->second;
-    out.states.clear();
+    out = it->second;
     return true;
   }
   bool available() const override { return mAvailable; }
@@ -68,7 +75,7 @@ private:
   static std::string key(const bitematica::core::BlockPos &p) {
     return std::to_string(p.x) + "," + std::to_string(p.y) + "," + std::to_string(p.z);
   }
-  std::unordered_map<std::string, std::string> mBlocks;
+  std::unordered_map<std::string, bitematica::core::BlockState> mBlocks;
   bool mAvailable{true};
 };
 
@@ -418,6 +425,115 @@ void testLooksWorldSpace() {
         "a zero forward vector is rejected");
 }
 
+// --- world source gate + probe (F1/F9) ------------------------------------------------
+
+void testWorldSourceVersionGate() {
+  std::printf("testWorldSourceVersionGate\n");
+  using bitematica::mod::GameWorldSource;
+  // A blank configured tag means "not verified": closed.
+  check(!GameWorldSource::versionGateOpen("", "1.26.51"), "blank configured tag keeps the gate shut");
+  // A matching tag (prefix match) opens the gate.
+  check(GameWorldSource::versionGateOpen("1.26.51", "1.26.51"), "an exact match opens the gate");
+  check(GameWorldSource::versionGateOpen("1.26.51", "1.26.51.1"),
+        "a configured tag prefixes a longer running tag");
+  // A mismatched running tag is closed.
+  check(!GameWorldSource::versionGateOpen("1.26.51", "1.26.60"),
+        "a mismatched version keeps the gate shut");
+  // An unreadable running tag with a configured tag is the user's acknowledgement: open, and the
+  // sanity probe is the safety net.
+  check(GameWorldSource::versionGateOpen("1.26.51", ""),
+        "an unreadable running tag with a configured tag opens the gate");
+}
+
+void testWorldSourceProbe() {
+  std::printf("testWorldSourceProbe\n");
+  using bitematica::mod::GameWorldSource;
+  using bitematica::core::BlockState;
+  using bitematica::core::BlockPos;
+
+  const BlockPos feet{10, 64, 10};
+  const BlockPos sky{10, 464, 10};
+
+  // A reader that reports stone at the feet and air above passes.
+  auto good = [](const BlockPos &p, BlockState &out) {
+    if (p.y == 64) out.name = "minecraft:stone";
+    else out = BlockState{};
+    return true;
+  };
+  check(GameWorldSource::probe(good, feet, sky) == GameWorldSource::ProbeResult::Passed,
+        "a plausible reader passes the probe");
+
+  // A reader that reports air under the feet fails.
+  auto feetAir = [](const BlockPos &, BlockState &out) {
+    out = BlockState{};
+    return true;
+  };
+  check(GameWorldSource::probe(feetAir, feet, sky) == GameWorldSource::ProbeResult::FeetIsAir,
+        "air under the feet fails the probe");
+
+  // A reader that reports solid 400 blocks up fails.
+  auto skySolid = [](const BlockPos &, BlockState &out) {
+    out.name = "minecraft:stone";
+    return true;
+  };
+  check(GameWorldSource::probe(skySolid, feet, sky) == GameWorldSource::ProbeResult::SkyIsNotAir,
+        "a solid sky position fails the probe");
+
+  // A reader that returns nothing fails as unreadable.
+  auto nothing = [](const BlockPos &, BlockState &) { return false; };
+  check(GameWorldSource::probe(nothing, feet, sky) == GameWorldSource::ProbeResult::Unreadable,
+        "a reader that returns nothing fails as unreadable");
+
+  // A null reader fails as unreadable, not a crash.
+  GameWorldSource::BlockReader none;
+  check(GameWorldSource::probe(none, feet, sky) == GameWorldSource::ProbeResult::Unreadable,
+        "a null reader fails as unreadable");
+}
+
+// --- incremental verification (F5) -----------------------------------------------------
+
+void testIncrementalVerification() {
+  std::printf("testIncrementalVerification\n");
+  // A 4x4x4 solid cube, all stone in the world, so every block is Correct.
+  bitematica::core::Schematic s;
+  s.palette.intern(bitematica::core::BlockState{});
+  bitematica::core::BlockState stone;
+  stone.name = "minecraft:stone";
+  s.palette.intern(stone);
+  s.bounds.min = {0, 0, 0};
+  s.bounds.max = {3, 3, 3};
+  s.blocks.assign(static_cast<size_t>(s.volume()), 1);
+
+  bitematica::world::Placement placement;
+  FakeWorld world;
+  for (int y = 0; y < 4; ++y) {
+    for (int z = 0; z < 4; ++z) {
+      for (int x = 0; x < 4; ++x) world.set({x, y, z}, "minecraft:stone");
+    }
+  }
+
+  bitematica::world::IncrementalVerifier verifier(s, placement, 0, 3, false);
+  check(!verifier.finished(), "a fresh incremental scan is not finished");
+  check(verifier.progressPercent() == 0, "progress starts at 0");
+
+  // A budget of 10 per step: 64 blocks need 7 steps.
+  int steps = 0;
+  while (!verifier.step(world, 10)) {
+    ++steps;
+    check(steps < 100, "the scan terminates");
+    if (steps >= 100) break;
+  }
+  check(verifier.finished(), "the scan finishes");
+  check(verifier.result().correct == 64, "all 64 blocks verified correct, got " +
+                                             std::to_string(verifier.result().correct));
+  check(verifier.progressPercent() == 100, "progress reaches 100");
+
+  // No section is starved: the queue is distance-ordered, so the first block checked is at the
+  // origin.
+  bitematica::world::IncrementalVerifier ordered(s, placement, 0, 3, false);
+  check(ordered.progressPercent() == 0, "the ordered scan also starts at 0");
+}
+
 // --- verification ---------------------------------------------------------------------
 
 void testVerification() {
@@ -448,10 +564,81 @@ void testVerification() {
   const auto result = bitematica::world::Verifier::verify(s, placement, world, 0, s.sizeY() - 1);
   check(result.available, "verification ran");
   check(result.missing == 1, "one missing block, got " + std::to_string(result.missing));
-  check(result.wrong == 1, "one wrong block, got " + std::to_string(result.wrong));
+  check(result.wrongBlock == 1, "one wrong block, got " + std::to_string(result.wrongBlock));
+  check(result.wrongState == 0, "no wrong-state blocks");
   check(result.correct == 25, "25 correct blocks, got " + std::to_string(result.correct));
   check(result.percentComplete() == 92, "percent complete is 92, got " +
                                             std::to_string(result.percentComplete()));
+}
+
+/// A block of the right type with the wrong state must be `WrongState`, distinct from `WrongBlock`,
+/// and a wrong type must be `WrongBlock`. This is the C6/verdict split the palette colours apart.
+void testVerificationWrongStateVsWrongBlock() {
+  std::printf("testVerificationWrongStateVsWrongBlock\n");
+  bitematica::core::Schematic s;
+  s.palette.intern(bitematica::core::BlockState{}); // 0 air
+  bitematica::core::BlockState stairs;
+  stairs.name = "minecraft:oak_stairs";
+  stairs.states = {{"facing", "north"}};
+  s.palette.intern(stairs); // 1
+  s.bounds.min = {0, 0, 0};
+  s.bounds.max = {1, 0, 0};
+  s.blocks = {1, 1};
+
+  bitematica::world::Placement placement;
+  placement.origin = {0, 0, 0};
+  FakeWorld world;
+  // (0,0,0): right type, wrong facing -> WrongState.
+  world.set({0, 0, 0}, "minecraft:oak_stairs", {{"facing", "south"}});
+  // (1,0,0): wrong type entirely -> WrongBlock.
+  world.set({1, 0, 0}, "minecraft:stone");
+
+  const auto result = bitematica::world::Verifier::verify(s, placement, world, 0, 0);
+  check(result.available, "verification ran");
+  check(result.wrongState == 1, "one wrong-state block, got " + std::to_string(result.wrongState));
+  check(result.wrongBlock == 1, "one wrong-block, got " + std::to_string(result.wrongBlock));
+  check(result.wrong() == 2, "wrong() sums wrong block and wrong state");
+}
+
+/// An unreadable block is `Unknown`, never `Missing`. This is the "chunk not loaded is not a hole"
+/// rule (F4): a source that is available but cannot read a particular position (an unloaded chunk)
+/// must not be reported as a block the player still has to place.
+void testVerificationUnknownNotMissing() {
+  std::printf("testVerificationUnknownNotMissing\n");
+  // A source that is available, but reports "cannot read" for one specific position.
+  class PartiallyUnreadable : public bitematica::world::WorldSource {
+  public:
+    bool readBlock(const bitematica::core::BlockPos &position,
+                   bitematica::core::BlockState &out) override {
+      if (position == unreadable) return false; // unloaded chunk
+      out = bitematica::core::BlockState{};
+      return true; // air
+    }
+    bool available() const override { return true; }
+    bitematica::core::BlockPos unreadable{5, 0, 0};
+  };
+
+  bitematica::core::Schematic s;
+  s.palette.intern(bitematica::core::BlockState{});
+  bitematica::core::BlockState stone;
+  stone.name = "minecraft:stone";
+  s.palette.intern(stone);
+  s.bounds.min = {0, 0, 0};
+  s.bounds.max = {1, 0, 0};
+  s.blocks = {1, 1};
+
+  bitematica::world::Placement placement;
+  placement.origin = {0, 0, 0};
+  PartiallyUnreadable world;
+  // With origin 0, local (0,0,0) and (1,0,0) map to world (0,0,0) and (1,0,0). Make the second one
+  // unreadable: the first is a readable air block (Missing), the second must be Unknown.
+  world.unreadable = {1, 0, 0};
+  const auto result = bitematica::world::Verifier::verify(s, placement, world, 0, 0);
+  check(result.missing == 1, "one readable-missing block, got " + std::to_string(result.missing));
+  check(result.unknown == 1, "an unreadable block is Unknown, got " +
+                                 std::to_string(result.unknown));
+  check(result.missing + result.unknown == 2, "every block is accounted for");
+  check(result.percentComplete() == 0, "an unreadable block is not counted as checked");
 }
 
 void testVerificationUnavailable() {
@@ -516,6 +703,46 @@ void testBlockTranslation() {
   const auto logOut = BlockTranslation::toBedrock(log);
   check(logOut.name == "minecraft:oak_log" && logOut.states.size() == 1,
         "an untranslated block passes through unchanged");
+
+  // A door's facing and hinge are translated (a door is a directional family).
+  bitematica::core::BlockState door;
+  door.name = "minecraft:oak_door";
+  door.states = {{"facing", "west"}, {"half", "bottom"}, {"hinge", "right"}};
+  const auto doorOut = BlockTranslation::toBedrock(door);
+  bool doorDirection = false;
+  for (const auto &[k, v] : doorOut.states) {
+    if (k == "weirdo_direction") doorDirection = (v == "1"); // west -> 1
+  }
+  check(doorDirection, "a door facing=west becomes weirdo_direction=1");
+
+  // G2: the data-driven table merges over the built-in renames.
+  BlockTranslation::clearUnmapped();
+  const int merged = BlockTranslation::loadJson(
+      R"({"blocks": {"minecraft:my_mod_block": "minecraft:stone"}})");
+  check(merged == 1, "one rename merged from JSON, got " + std::to_string(merged));
+  bitematica::core::BlockState modded;
+  modded.name = "minecraft:my_mod_block";
+  check(BlockTranslation::toBedrock(modded).name == "minecraft:stone",
+        "the merged rename is applied");
+
+  // G4: an unknown id is reported as unmapped, not silently accepted.
+  BlockTranslation::clearUnmapped();
+  bitematica::core::BlockState weird;
+  weird.name = "minecraft:totally_unknown_xyz";
+  check(BlockTranslation::isUnmapped(weird.name), "an unknown id is flagged unmapped");
+  const auto unmapped = BlockTranslation::unmappedBlocks();
+  bool recorded = false;
+  for (const auto &name : unmapped) {
+    if (name == "totally_unknown_xyz") recorded = true;
+  }
+  check(recorded, "the unmapped id is recorded for the status line");
+
+  // G7: a newer game version than the table is flagged.
+  check(!BlockTranslation::isVersionNewerThanTable("1.26.51"),
+        "the table's own version is not flagged as newer");
+  check(BlockTranslation::isVersionNewerThanTable("1.26.60"),
+        "a newer game version is flagged");
+  check(!BlockTranslation::isVersionNewerThanTable(""), "an unknown version is not flagged");
 }
 
 // --- selection + writers --------------------------------------------------------------
@@ -571,6 +798,49 @@ void testLitematicWriteRoundTrip() {
   check(before.size() == after.size(), "the same distinct materials survive");
 }
 
+/// G5: a block entity (chest contents) captured as raw NBT survives a `.litematic` round trip.
+void testBlockEntityRoundTrip() {
+  std::printf("testBlockEntityRoundTrip\n");
+  // Build a 1x1x1 chest schematic with one block entity.
+  bitematica::core::Schematic s;
+  s.name = "chest test";
+  s.palette.intern(bitematica::core::BlockState{});
+  bitematica::core::BlockState chest;
+  chest.name = "minecraft:chest";
+  s.palette.intern(chest);
+  s.bounds.min = {0, 0, 0};
+  s.bounds.max = {0, 0, 0};
+  s.blocks = {1};
+
+  // A minimal chest block entity as raw NBT (a named compound with an `id`).
+  bitematica::nbt::Tag be = bitematica::nbt::NbtWriter::compound("");
+  be.children.push_back(bitematica::nbt::NbtWriter::string("id", "Chest"));
+  be.children.push_back(bitematica::nbt::NbtWriter::string("CustomName", "Loot"));
+  const std::vector<uint8_t> beBytes = bitematica::nbt::NbtWriter::writeRaw(be);
+  s.blockEntities.emplace_back(0, std::string(beBytes.begin(), beBytes.end()));
+
+  const std::string encoded = bitematica::format::LitematicWriter::bytes(s, "Chest", "Tests");
+  check(!encoded.empty(), "the writer produced bytes with a block entity");
+
+  const std::vector<uint8_t> bytes(encoded.begin(), encoded.end());
+  const auto reread = bitematica::format::SchematicFormat::read(bytes, "chest.litematic");
+  check(reread.success, std::string("the written litematic reloads: ") + reread.error);
+  // The block-entity list must survive in the written document (read back through the reader).
+  const auto doc = bitematica::nbt::NbtReader::readFile(bytes);
+  check(doc.valid(), "the document re-parses");
+  const bitematica::nbt::Tag *regions = doc.root.find("Regions");
+  check(regions != nullptr, "the Regions compound is present");
+  if (regions != nullptr && !regions->children.empty()) {
+    const bitematica::nbt::Tag *entities = regions->children.front().find("BlockEntities");
+    check(entities != nullptr, "the BlockEntities list is written");
+    if (entities != nullptr) {
+      check(!entities->children.empty(), "the chest block entity survived");
+      const bitematica::nbt::Tag *name = entities->children.front().find("CustomName");
+      check(name != nullptr && name->stringValue == "Loot", "the block entity's data survived");
+    }
+  }
+}
+
 // --- live materials -------------------------------------------------------------------
 
 void testLiveMaterials() {
@@ -608,6 +878,63 @@ void testLiveMaterials() {
   const std::string csv = bitematica::core::LiveMaterials::toCsv(rows);
   check(csv.rfind("block,required,placed,missing", 0) == 0, "CSV has the expected header");
   check(csv.find("minecraft:stone,26,25,1") != std::string::npos, "CSV has the stone row");
+
+  // I6: a plain-text shopping list is produced.
+  const std::string text = bitematica::core::LiveMaterials::toText(rows);
+  check(text.find("minecraft:stone") != std::string::npos, "the text list has the stone row");
+}
+
+void testMaterialStackAndItemCounts() {
+  std::printf("testMaterialStackAndItemCounts\n");
+  using bitematica::core::LiveMaterials;
+
+  // I4: stacks + remainder + shulker equivalents.
+  auto s = LiveMaterials::stacksFor(140); // 140 = 2 stacks + 12
+  check(s.stacks == 2 && s.remainder == 12, "140 splits into 2 stacks + 12");
+  check(s.shulkers == 1, "140 needs one shulker box");
+  auto big = LiveMaterials::stacksFor(64 * 27 * 2 + 5); // two full shulkers + a bit
+  check(big.shulkers == 3, "the shulker count rounds up, got " + std::to_string(big.shulkers));
+  check(LiveMaterials::stacksFor(0).stacks == 0, "zero needs no stacks");
+
+  // I7: item-count edge cases.
+  bitematica::core::BlockState door;
+  door.name = "minecraft:oak_door";
+  check(LiveMaterials::itemCount(door, 2) == 1, "a two-block door is one item");
+  check(LiveMaterials::itemCount(door, 4) == 2, "four door blocks are two items");
+
+  bitematica::core::BlockState bed;
+  bed.name = "minecraft:red_bed";
+  check(LiveMaterials::itemCount(bed, 2) == 1, "a bed is one item");
+
+  bitematica::core::BlockState doubleSlab;
+  doubleSlab.name = "minecraft:oak_slab";
+  doubleSlab.states = {{"double", "1"}};
+  check(LiveMaterials::itemCount(doubleSlab, 3) == 6, "a double slab counts two items per block");
+
+  bitematica::core::BlockState pickles;
+  pickles.name = "minecraft:sea_pickle";
+  pickles.states = {{"cluster_count", "4"}};
+  check(LiveMaterials::itemCount(pickles, 1) == 4, "a 4-pickle cluster is four items");
+
+  bitematica::core::BlockState stone;
+  stone.name = "minecraft:stone";
+  check(LiveMaterials::itemCount(stone, 10) == 10, "a normal block counts one item each");
+
+  // I5: filters.
+  std::vector<bitematica::core::LiveMaterialRow> rows = {
+      {"minecraft:stone", 100, 100, 0},
+      {"minecraft:dirt", 50, 20, 30},
+  };
+  LiveMaterials::Filter onlyMissing;
+  onlyMissing.onlyMissing = true;
+  check(LiveMaterials::applyFilter(rows, onlyMissing).size() == 1, "only-missing drops completed");
+  LiveMaterials::Filter hideDone;
+  hideDone.hideCompleted = true;
+  check(LiveMaterials::applyFilter(rows, hideDone).size() == 1, "hide-completed drops completed");
+  LiveMaterials::Filter search;
+  search.search = "dirt";
+  const auto found = LiveMaterials::applyFilter(rows, search);
+  check(found.size() == 1 && found[0].name == "minecraft:dirt", "the search filters by name");
 }
 
 // --- cheat route ----------------------------------------------------------------------
@@ -648,13 +975,20 @@ int main() {
   testPlacementCullMvpExcludesPlacementTransform();
   testLocalCameraMath();
   testLooksWorldSpace();
+  testIncrementalVerification();
+  testWorldSourceVersionGate();
+  testWorldSourceProbe();
   testVerification();
+  testVerificationWrongStateVsWrongBlock();
+  testVerificationUnknownNotMissing();
   testVerificationUnavailable();
   testVerificationExtras();
   testBlockTranslation();
   testSelectionCapture();
   testLitematicWriteRoundTrip();
+  testBlockEntityRoundTrip();
   testLiveMaterials();
+  testMaterialStackAndItemCounts();
   testCheatCommands();
   std::printf("============================\n");
   std::printf("%d checks, %d failures\n", g_checks, g_failures);

@@ -67,12 +67,17 @@ const Functions &resolve() {
   LOAD(GetUniformLocation, "glGetUniformLocation");
   LOAD(UniformMatrix4fv, "glUniformMatrix4fv");
   LOAD(Uniform1f, "glUniform1f");
+  LOAD(Uniform1i, "glUniform1i");
   LOAD(Uniform3f, "glUniform3f");
   LOAD(Uniform4f, "glUniform4f");
+  LOAD(Uniform4fv, "glUniform4fv");
   LOAD(ActiveTexture, "glActiveTexture");
   LOAD(BindTexture, "glBindTexture");
   LOAD(DrawElements, "glDrawElements");
   LOAD(DrawArrays, "glDrawArrays");
+  LOAD(PolygonOffset, "glPolygonOffset");
+  LOAD(LineWidth, "glLineWidth");
+  LOAD(GetString, "glGetString");
 #undef LOAD
 
   return g_functions;

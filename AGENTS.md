@@ -123,16 +123,48 @@ src/render/HudOverlay.cpp src/mod/ControllerNavigator.cpp src/mod/JsonConfig.cpp
   cannot resolve it and the launcher shows "Built for a different game build (missing symbol)".
   GlowberryClient pins a preloader commit that predates `pl/Render.hpp`, so `pl::render::*` is
   declared weak in `SdkCompat.hpp` and every call goes through `bitematica::mod::SdkRender`, which
-  checks the pointer. Without the render API the mod falls back to the software overlay
-  (`mWorldSpaceAvailable == false`). Two guards: `test/link_check.sh` (the linked `.so` has no
-  strong `pl::render::` reference) and `tools/verify_antegg.py` (the packaged `.so`). Both run in CI.
-  Do not include `pl/Render.hpp` without the compat header, and do not add a direct
-  `pl::render::` call that skips `SdkRender`.
-- **`uMvp` must be the plain world->clip matrix.** The vertex shader applies the placement's yaw
-  and origin itself, so `draw()` takes the world `mvp` and the placement-local frustum/camera
-  separately (`render::computePlacementCull`). Passing `viewProjection * localToWorld` as `uMvp`
-  transforms every vertex twice — `testPlacementCullMvpExcludesPlacementTransform` fails if that
-  creeps back in.
+  checks the pointer. **When the render API is absent the mod draws nothing and says so on the status
+  line** — it does not fall back to a screen-space overlay. Two guards: `test/link_check.sh` (the
+  linked `.so` has no strong `pl::render::` reference) and `tools/verify_antegg.py` (the packaged
+  `.so`). Both run in CI. Do not include `pl/Render.hpp` without the compat header, and do not add a
+  direct `pl::render::` call that skips `SdkRender`.
+- **The HUD is chrome only; the schematic is never drawn through draw commands.** `UiCommand::Kind`
+  is `Rect`/`Text` only — there is no geometry primitive, so schematic geometry cannot be emitted via
+  HUD commands even by mistake. `HudOverlay::buildCommands` takes no schematic and no camera.
+  `test/hud_geometry_guard.sh` (grep guard) and `testChromeNeverDrawsSchematicGeometry`
+  (`host_tests.cpp`) enforce it; both run in CI. If you are tempted to add a Triangle kind to make a
+  2D preview, don't — that is the "software overlay" this project exists to avoid.
+- **The minimum preloader for world-space rendering is commit `167226d`** (adds `pl/Render.hpp`);
+  GlowberryClient's pin must be at or after it. See `docs/BUMP_PRELOADER.md`. The SDK's
+  `viewProjection` is **world→clip** (documented in `docs/MATRIX_SPACE.md`) — do not treat it as
+  camera-relative.
+- **`uMvp` is the camera-relative clip matrix, and the placement transform is applied exactly once.**
+  `render::computePlacementCull(projection, view, ...)` returns `mvp = projection * rotation(view)`
+  and `cameraRelativeOrigin = placementOrigin − cameraPosition` (subtracted in **double** precision,
+  then narrowed to float). The vertex shader applies the placement's yaw and that relative origin
+  itself, so no large world offset ever enters a float and the ghost is stable at ±3e7. Passing the
+  world `viewProjection * localToWorld` (or folding the placement transform into `mvp`) transforms
+  every vertex twice — `testCameraRelativeMvpExcludesPlacementTransform` fails if that creeps back in.
+- **Meshing and outlines run on the worker, not the render thread.** `SectionMesher::build` and
+  `SectionMesher::buildOutlines` produce geometry; the render callback only uploads buffers and
+  draws. Outlines are block-edge `GL_LINES` (surface blocks only), a second tiny program
+  (`mLineProgram`), with a smaller polygon offset than the fill pass. Fill uses
+  `glPolygonOffset(factor, units)` (negative, configurable) so ghost faces do not z-fight real ones.
+- **The GL backend is gated on `gles::isGles3OrLater(GL_VERSION)`.** On a non-GLES-3 (e.g. Vulkan)
+  backend `initialize()` returns false, the mod records a one-time named reason and draws nothing.
+  The predicate is header-only and unit-tested in `host_tests_render.cpp`.
+- **GL resources are freed on the render thread.** `disable()`/`unload()` set `mGlShutdownRequested`;
+  the next render frame calls `releaseGlResources()` (buffers + programs) with the context current,
+  then unregisters the callbacks. Never free GL objects off the render thread.
+- **Block colours are data (`data/block_colors.json`), loaded over an embedded default.** `tools/gen_block_colors.py` generates the file (hand table by default, or measured from a vanilla resource pack with `--textures`). Unknown blocks get a deterministic hash colour and are **recorded** (`BlockColors::unknownBlocks()`), never fabricated silently. The file is packaged via `build.sh`/`build.ps1 --extra`.
+- **Non-cube blocks are meshed from `core/BlockShape.hpp`, not as full cubes.** `boxesFor(state)` returns axis-aligned boxes; `isCube` is true only for a full block. The mesher's greedy full-cube path skips non-cubes (but they still count as solid for neighbour culling); they are emitted as boxes afterward. `neverRenders` (air, structure void, light, barrier-unless-toggled) blocks are neither drawn nor solid.
+- **The verifier has six verdicts, not four.** `Correct, Missing, WrongBlock, WrongState, Extra, Unknown`. `Unknown` (an unreadable/unloaded block) is never counted as `Missing` or as `Correct`, and is excluded from `percentComplete`'s denominator. `LiveMaterials` counts `WrongBlock`/`WrongState` as outstanding and ignores `Unknown`. `MismatchPalette` (default/colour-blind/high-contrast presets) colours them.
+- **The placement's mirror is baked into the mesh, not applied by the shader.** The vertex shader applies the yaw and origin only. `SectionMesher` reflects local coordinates for a mirrored placement and reverses the triangle winding (a reflection flips handedness; without the flip, back-face culling would hide the mirrored ghost). Rotations stay in the shader. `BlockStateTransform` rotates/mirrors each block *state* (facing/axis/hinge) to match.
+- **Placements persist to `placements.json` (`litematica/PlacementStore`).** Only the placement (and its source `schematicId`) is saved; the schematic is re-read on load. Versioned (a newer version is refused, not half-read), atomic write (temp + rename). `PlacementManager` keeps a 32-entry undo/redo ring; `pushUndo()` before every edit.
+- **`BlockSource::getBlock` is never guessed.** `GameWorldSource` is fail-closed three times: a version gate (`versionGateOpen`), a **confirmed reader** (`setBlockReader`; the mod will not call a resolved address until a human supplies a reader with a known signature), and a sanity `probe` (feet not air, 400 up is air). `readBlock` refuses to call anything until the probe passed. `docs/FINDING_GETBLOCK.md` is the discovery guide. The pure helpers are header-only and tested in `host_tests_world.cpp`.
+- **Verification is incremental and per-vertex.** `IncrementalVerifier` scans a budgeted number of blocks per call (`verifyBlocksPerFrame`), nearest-first. The mesher tags each vertex with the block's verdict (`MeshVertex::verdict`), so the mismatch display modes (F6) are a shader uniform (`uMismatchMode` + `uPalette`), not a remesh.
+- **Translation is data-driven and honest about gaps.** `data/block_translation.json` merges renames over the built-in table (`BlockTranslation::loadJson`). An id that is neither renamed nor a known pass-through family is reported by `isUnmapped` (recorded, not silently accepted) and drawn as a magenta placeholder. `tools/translation_coverage.py` writes `docs/TRANSLATION_COVERAGE.md`.
+- **Block entities survive a `.litematic` write.** `Schematic::blockEntities` holds raw NBT bytes; `LitematicWriter` re-parses each and writes it under the region's `BlockEntities` list with a `Pos`. `testBlockEntityRoundTrip` pins it.
 - **The camera comes from `LocalPlayerFeed`, not a matrix scan.** It hooks `ClientInstance`'s
   local-player slot 31 **by RTTI name** and reads `Actor+0x230` (position) / `+0x238` (yaw,pitch),
   the same offsets the launcher's own feed uses; they are shared by 1.26.33 / 1.26.50 / 1.26.51.

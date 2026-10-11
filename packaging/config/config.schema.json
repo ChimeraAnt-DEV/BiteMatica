@@ -65,6 +65,19 @@
       "minimum": 0,
       "maximum": 1024
     },
+    "maxSchematicBlocks": {
+      "title": "Max Schematic Blocks",
+      "description": "A schematic above this many blocks is refused with a named error instead of risking an out-of-memory crash.",
+      "type": "integer",
+      "minimum": 100000
+    },
+    "uploadSectionsPerFrame": {
+      "title": "Upload Sections Per Frame",
+      "description": "GPU section uploads per frame (1-64). Spreads a large mesh upload so it cannot hitch the frame.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    },
     "layerMode": {
       "title": "Layer Mode",
       "description": "0 all layers, 1 a single layer, 2 a range.",
@@ -75,6 +88,32 @@
     "layerSingle": { "title": "Single Layer", "type": "integer", "minimum": 0 },
     "layerMin": { "title": "Range Start", "type": "integer", "minimum": 0 },
     "layerMax": { "title": "Range End", "type": "integer", "minimum": 0 },
+    "showOutlines": {
+      "title": "Block Outlines",
+      "description": "Draw the block-edge outline over the ghost blocks.",
+      "type": "boolean"
+    },
+    "outlineWidth": {
+      "title": "Outline Width",
+      "description": "Outline line width in pixels (0.5-8; the driver may clamp it).",
+      "type": "number",
+      "minimum": 0.5,
+      "maximum": 8.0
+    },
+    "polygonOffsetFactor": {
+      "title": "Polygon Offset Factor",
+      "description": "Depth-bias factor for the ghost faces, to stop z-fighting with real blocks. Negative pulls the ghost toward the camera (-8 to 0).",
+      "type": "number",
+      "minimum": -8.0,
+      "maximum": 0.0
+    },
+    "polygonOffsetUnits": {
+      "title": "Polygon Offset Units",
+      "description": "Depth-bias units for the ghost faces (-16 to 0).",
+      "type": "number",
+      "minimum": -16.0,
+      "maximum": 0.0
+    },
     "verifyAgainstWorld": {
       "title": "Verify Against World",
       "description": "Colour blocks by whether the live world matches the schematic.",
@@ -85,11 +124,61 @@
       "description": "Also flag world blocks sitting where the schematic wants air.",
       "type": "boolean"
     },
+    "verifyMismatchMode": {
+      "title": "Mismatch Display",
+      "description": "0 shows all ghost blocks, 1 shows only mismatches, 2 hides correct blocks.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2
+    },
+    "verifyBlocksPerFrame": {
+      "title": "Verify Blocks Per Frame",
+      "description": "How many blocks the verifier checks per frame (100-200000). Larger schematics are scanned incrementally at this rate.",
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 200000
+    },
+    "verifyGameVersionTag": {
+      "title": "Verified Game Version",
+      "description": "The game version the getBlock slot was confirmed against. The world source is only enabled when this matches the running version. See docs/FINDING_GETBLOCK.md.",
+      "type": "string"
+    },
     "verifyBlockSourceSlot": {
       "title": "BlockSource::getBlock Slot",
       "description": "Primary-vtable slot of the world block getter for your game build, or -1 to leave verification off. Only set this once you have confirmed the slot for your build: a wrong slot can crash the game.",
       "type": "integer",
       "minimum": -1
+    },
+    "panicHidden": {
+      "title": "Panic Hide",
+      "description": "Hide all rendering instantly without unloading. Toggle with the H toolbar button.",
+      "type": "boolean"
+    },
+    "uiScale": {
+      "title": "UI Scale",
+      "description": "Toolbar button scale. Clamped to a 1.2 minimum so touch targets stay above 48 dp.",
+      "type": "number",
+      "minimum": 1.2,
+      "maximum": 3.0
+    },
+    "textScale": {
+      "title": "Text Scale",
+      "description": "Status line and panel text size.",
+      "type": "number",
+      "minimum": 0.8,
+      "maximum": 2.5
+    },
+    "highContrast": {
+      "title": "High Contrast",
+      "description": "Opaque backgrounds and maximum text contrast.",
+      "type": "boolean"
+    },
+    "palettePreset": {
+      "title": "Mismatch Palette",
+      "description": "0 default, 1 colour-blind friendly, 2 high contrast.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2
     },
     "toolbarX": { "title": "Toolbar X", "type": "integer", "minimum": 0 },
     "toolbarY": { "title": "Toolbar Y", "type": "integer", "minimum": 0 },

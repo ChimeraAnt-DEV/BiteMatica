@@ -68,7 +68,7 @@ jobs:
         run: cmake -S . -B build/host -DCMAKE_BUILD_TYPE=Release
 
       - name: Build host tests
-        run: cmake --build build/host --target bitematica_tests bitematica_world_tests bitematica_litematica_tests --parallel
+        run: cmake --build build/host --target bitematica_tests bitematica_world_tests bitematica_litematica_tests bitematica_render_tests --parallel
 
       - name: Run host tests (formats, mesh, UI)
         run: ./build/host/bitematica_tests
@@ -79,10 +79,21 @@ jobs:
       - name: Run host tests (Litematica toolset - tool modes, layers, ray-cast, Easy Place, paste, menus)
         run: ./build/host/bitematica_litematica_tests
 
+      - name: Run host tests (render math - camera-relative precision, culling, backend gate, outlines)
+        run: ./build/host/bitematica_render_tests
+
       - name: Check the mod loads on an older preloader (weak render symbols)
         run: |
           chmod +x test/link_check.sh
           PRELOADER_INCLUDE=third_party/preloader-android/include test/link_check.sh
+
+      - name: Check no schematic geometry can be drawn through HUD draw commands
+        run: |
+          chmod +x test/hud_geometry_guard.sh
+          test/hud_geometry_guard.sh
+
+      - name: Check the packaged config and schema stay in sync
+        run: python3 tools/check_config_sync.py
 
       - name: Build and package .AntEgg
         run: |
@@ -101,7 +112,8 @@ jobs:
               names = sorted(archive.namelist())
               print("\n".join(names))
               required = ["egg.json", "manifest.json", "bin/libbitematica.so",
-                          "config/config.json", "config/config.schema.json"]
+                          "config/config.json", "config/config.schema.json",
+                          "data/block_colors.json", "data/block_translation.json"]
               for entry in required:
                   if entry not in names:
                       sys.exit("missing required entry: " + entry)

@@ -71,6 +71,21 @@ Tag NbtReader::readTag(TagType type, bool named) {
   if (named) tag.name = readName();
   if (!ok()) return tag;
 
+  // A nesting-depth cap (L4): a cyclic or deliberately deep document must fail with a named reason
+  // rather than overflowing the stack. Enter/leave around the container cases below.
+  struct DepthGuard {
+    int &depth;
+    bool entered;
+    ~DepthGuard() { if (entered) --depth; }
+  } guard{mDepth, false};
+  if (type == TagType::List || type == TagType::Compound) {
+    if (++mDepth > kMaxDepth) {
+      fail("NBT nesting is deeper than the limit");
+      return tag;
+    }
+    guard.entered = true;
+  }
+
   switch (type) {
     case TagType::End:
       break;

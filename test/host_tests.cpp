@@ -25,8 +25,6 @@
 #include "nbt/NbtReader.hpp"
 #include "nbt/NbtWriter.hpp"
 #include "render/HudOverlay.hpp"
-#include "render/MeshBuilder.hpp"
-#include "render/ViewCamera.hpp"
 
 namespace {
 
@@ -86,6 +84,27 @@ void testNbtRejectsGarbage() {
   const std::vector<uint8_t> garbage = {0xff, 0x00, 0x12, 0x34, 0x56};
   const bitematica::nbt::Document document = bitematica::nbt::NbtReader::readFile(garbage);
   check(!document.valid(), "garbage is rejected, not partially decoded");
+
+  // L4: a truncated document (a valid header then a cut-off payload) is rejected, not half-read.
+  const std::vector<uint8_t> truncated = {0x0a, 0x00, 0x00, 0x03, 0x00, 0x01};
+  check(!bitematica::nbt::NbtReader::readFile(truncated).valid(),
+        "a truncated document is rejected");
+
+  // L4: a deeply nested compound must fail with the depth limit, not overflow the stack.
+  std::vector<uint8_t> deep;
+  const int depth = 600;
+  for (int i = 0; i < depth; ++i) {
+    deep.push_back(0x0a); // TAG_Compound
+    deep.push_back(0x00);
+    deep.push_back(0x00); // empty name
+  }
+  deep.push_back(0x00); // the innermost TAG_End
+  // Close each compound with its own TAG_End.
+  for (int i = 0; i < depth; ++i) deep.push_back(0x00);
+  const bitematica::nbt::Document deepDoc = bitematica::nbt::NbtReader::readFile(deep);
+  check(!deepDoc.valid(), "a too-deeply-nested document is rejected");
+  check(deepDoc.error.find("deep") != std::string::npos,
+        "the depth rejection names the reason: " + deepDoc.error);
 }
 
 // --- format readers -----------------------------------------------------------------
@@ -197,65 +216,6 @@ void testDetection() {
         "png extension rejected");
 }
 
-// --- mesh + camera ------------------------------------------------------------------
-
-void testCameraProjection() {
-  std::printf("testCameraProjection\n");
-  bitematica::render::ViewCamera camera;
-  camera.yawDegrees = 0.0f;
-  camera.pitchDegrees = 0.0f;
-  camera.scale = 10.0f;
-  camera.centerX = 100.0f;
-  camera.centerY = 100.0f;
-
-  const auto p = camera.projectCentered(0.0f, 0.0f, 0.0f);
-  checkNear(p.x, 100.0f, 0.01f, "origin projects to center x");
-  checkNear(p.y, 100.0f, 0.01f, "origin projects to center y");
-
-  const auto right = camera.projectCentered(1.0f, 0.0f, 0.0f);
-  checkNear(right.x, 110.0f, 0.01f, "+x projects to the right");
-}
-
-void testMeshBuildsAndCulls() {
-  std::printf("testMeshBuildsAndCulls\n");
-  const auto result =
-      bitematica::format::SchematicFormat::readPath(fixture("cube.litematic"));
-  check(result.success, "fixture loads for meshing");
-  if (!result.success) return;
-
-  bitematica::render::ViewCamera camera;
-  camera.scale = 8.0f;
-  camera.centerX = 400.0f;
-  camera.centerY = 300.0f;
-
-  const auto mesh = bitematica::render::MeshBuilder::build(result.schematic, camera, 100000);
-  check(!mesh.triangles.empty(), "mesh is non-empty");
-  check(mesh.visibleBlocks == 26, "26 visible blocks (the 3x3x3 center is enclosed)");
-  // Each visible block contributes at most 3 front faces x 2 triangles = 6, never more.
-  check(mesh.triangles.size() <= 26u * 6u, "triangle count within the face-cull bound");
-  check(mesh.triangles.size() >= 26u * 2u, "at least one face drawn per block");
-  check(!mesh.truncated, "small schematic is not truncated");
-
-  // Painter order: depths must be non-increasing.
-  bool sorted = true;
-  for (size_t i = 1; i < mesh.triangles.size(); ++i) {
-    if (mesh.triangles[i].depth > mesh.triangles[i - 1].depth + 0.001f) sorted = false;
-  }
-  check(sorted, "triangles are sorted far-to-near");
-}
-
-void testMeshTruncation() {
-  std::printf("testMeshTruncation\n");
-  const auto result =
-      bitematica::format::SchematicFormat::readPath(fixture("cube.litematic"));
-  if (!result.success) return;
-  bitematica::render::ViewCamera camera;
-  // Cap below the 27 visible blocks.
-  const auto mesh = bitematica::render::MeshBuilder::build(result.schematic, camera, 5);
-  check(mesh.truncated, "cap is honored and reported");
-  check(mesh.visibleBlocks == 26, "visible count still reports the truth");
-}
-
 // --- toolbar + controller -----------------------------------------------------------
 
 void testToolbarHitTest() {
@@ -266,7 +226,7 @@ void testToolbarHitTest() {
   const auto buttons = bitematica::render::HudOverlay::layoutToolbar(config);
   // Twelve original controls plus six world-space additions (verify, layers, move, rotate,
   // mirror, CSV export).
-  check(buttons.size() == 23, "twenty-three toolbar buttons, got " +
+  check(buttons.size() == 24, "twenty-four toolbar buttons, got " +
                                   std::to_string(buttons.size()));
 
   const auto &first = buttons.front();
@@ -281,10 +241,37 @@ void testToolbarHitTest() {
   check(miss == nullptr, "a point outside every button misses");
 }
 
+/// J4: the toolbar scale grows the touch targets, and the config clamps a too-small scale up to the
+/// accessibility floor so a button is never below ~48 px.
+void testToolbarScaleAndTouchFloor() {
+  std::printf("testToolbarScaleAndTouchFloor\n");
+  bitematica::mod::Config small;
+  small.uiScale = 1.0f; // below the floor; normalize clamps it
+  small.normalize();
+  check(small.uiScale >= 1.2f, "a scale below the floor is clamped up");
+  const auto buttons = bitematica::render::HudOverlay::layoutToolbar(small);
+  check(!buttons.empty() && buttons.front().w >= 48.0f,
+        "the smallest button is at least 48 px, got " + std::to_string(buttons.front().w));
+
+  bitematica::mod::Config big;
+  big.uiScale = 2.0f;
+  big.normalize();
+  const auto bigButtons = bitematica::render::HudOverlay::layoutToolbar(big);
+  check(bigButtons.front().w > buttons.front().w, "a larger scale makes bigger buttons");
+
+  // J9: the text scale and palette preset are clamped.
+  bitematica::mod::Config acc;
+  acc.textScale = 0.1f;
+  acc.palettePreset = 9;
+  acc.normalize();
+  check(acc.textScale >= 0.8f, "text scale is clamped to the minimum");
+  check(acc.palettePreset == 0, "an out-of-range palette preset falls back to default");
+}
+
 void testControllerNavigation() {
   std::printf("testControllerNavigation\n");
   bitematica::mod::ControllerNavigator nav;
-  const int count = 23;
+  const int count = 24;
 
   auto result = nav.handleKey(bitematica::mod::ControllerNavigator::DpadRight, true, count);
   check(result.handled && !result.activated, "d-pad right moves focus, does not activate");
@@ -325,10 +312,10 @@ void testControllerNavigation() {
   check(orderMatches, "controller grid order matches the toolbar order");
 }
 
-// --- overlay commands ---------------------------------------------------------------
+// --- HUD chrome ---------------------------------------------------------------------
 
-void testOverlayCommands() {
-  std::printf("testOverlayCommands\n");
+void testChromeCommands() {
+  std::printf("testChromeCommands\n");
   const auto result =
       bitematica::format::SchematicFormat::readPath(fixture("cube.litematic"));
   if (!result.success) return;
@@ -336,26 +323,20 @@ void testOverlayCommands() {
   bitematica::mod::Config config;
   config.showToolbar = true;
   config.showMaterialList = true;
-  bitematica::render::ViewCamera camera;
-  camera.centerX = 400;
-  camera.centerY = 300;
 
   const auto buttons = bitematica::render::HudOverlay::layoutToolbar(config);
   const auto materials = bitematica::core::MaterialList::build(result.schematic);
   const auto commands = bitematica::render::HudOverlay::buildCommands(
-      result.schematic, config, camera, buttons, materials, "litematic 3x3x3", true);
-  check(!commands.empty(), "overlay emits commands");
+      config, buttons, materials, "litematic 3x3x3", true);
+  check(!commands.empty(), "chrome emits commands");
 
-  bool sawTriangle = false;
   bool sawToolbarText = false;
   bool sawMaterial = false;
   for (const auto &c : commands) {
-    if (c.kind == bitematica::render::UiCommand::Kind::Triangle) sawTriangle = true;
     if (c.kind == bitematica::render::UiCommand::Kind::Text && c.text == "Materials")
       sawMaterial = true;
     if (c.kind == bitematica::render::UiCommand::Kind::Text && c.text == "M") sawToolbarText = true;
   }
-  check(sawTriangle, "mesh triangles are present");
   check(sawMaterial, "material panel header present");
   check(sawToolbarText, "toolbar labels present");
 
@@ -365,17 +346,47 @@ void testOverlayCommands() {
   check(((faded >> 24) & 0xff) < ((opaque >> 24) & 0xff), "opacity lowers alpha");
 }
 
-void testHiddenModeDrawsNoMesh() {
-  std::printf("testHiddenModeDrawsNoMesh\n");
+/// The schematic must never be drawn as HUD geometry. This is the regression guard for the
+/// "software overlay" fallback: the chrome command vocabulary has no triangle primitive, so
+/// there is no way to emit schematic geometry through it, and the material panel is the only
+/// thing whose presence depends on a schematic being loaded.
+void testChromeNeverDrawsSchematicGeometry() {
+  std::printf("testChromeNeverDrawsSchematicGeometry\n");
   const auto result =
       bitematica::format::SchematicFormat::readPath(fixture("cube.litematic"));
   if (!result.success) return;
+
   bitematica::mod::Config config;
-  config.renderMode = bitematica::mod::RenderMode::Hidden;
-  bitematica::render::ViewCamera camera;
-  const auto commands = bitematica::render::HudOverlay::buildMeshCommands(
-      result.schematic, config, camera);
-  check(commands.empty(), "hidden mode emits no geometry");
+  config.showToolbar = true;
+  config.showMaterialList = true;
+  config.renderMode = bitematica::mod::RenderMode::Skeleton; // most tempting to fake with chrome
+
+  const auto buttons = bitematica::render::HudOverlay::layoutToolbar(config);
+  const auto materials = bitematica::core::MaterialList::build(result.schematic);
+
+  // With no schematic loaded the panel is not drawn; with one loaded it is. Neither path emits a
+  // triangle, and the command count is bounded by the toolbar grid plus a small material panel —
+  // there is no per-block command explosion.
+  const auto noSchematic = bitematica::render::HudOverlay::buildCommands(
+      config, buttons, {}, "nothing loaded", false);
+  const auto withSchematic = bitematica::render::HudOverlay::buildCommands(
+      config, buttons, materials, "loaded", true);
+
+  // Every emitted command is chrome (a rect or text). The vocabulary has no geometry primitive at
+  // all — `UiCommand::Kind` is only Rect/Text — so schematic geometry cannot be drawn through the
+  // HUD even by mistake.
+  bool onlyChrome = true;
+  for (const auto &c : withSchematic) {
+    if (c.kind != bitematica::render::UiCommand::Kind::Rect &&
+        c.kind != bitematica::render::UiCommand::Kind::Text) {
+      onlyChrome = false;
+    }
+  }
+  check(onlyChrome, "every HUD command is chrome (rect or text)");
+  check(withSchematic.size() < 200, "chrome command count is bounded, not per-block");
+  // The panel only appears when there is something to count.
+  check(noSchematic.size() < withSchematic.size(),
+        "the material panel is only emitted when a schematic is loaded");
 }
 
 void testConfigNormalize() {
@@ -388,6 +399,31 @@ void testConfigNormalize() {
   check(config.opacity == 10, "opacity clamped to the minimum");
   check(config.maxRenderBlocks == 500, "render cap clamped to the minimum");
   check(config.toolbarX == 0, "negative anchor clamped to zero");
+
+  // K6/K1: the memory cap and upload budget are clamped.
+  bitematica::mod::Config perf;
+  perf.maxSchematicBlocks = 10;
+  perf.uploadSectionsPerFrame = 0;
+  perf.normalize();
+  check(perf.maxSchematicBlocks >= 100000, "the memory cap has a floor");
+  check(perf.uploadSectionsPerFrame >= 1, "the upload budget has a floor of 1");
+  perf.uploadSectionsPerFrame = 999;
+  perf.normalize();
+  check(perf.uploadSectionsPerFrame <= 64, "the upload budget has a ceiling");
+}
+
+/// L8: an older config is upgraded to the current version and a fresh one is left alone.
+void testConfigMigration() {
+  std::printf("testConfigMigration\n");
+  bitematica::mod::Config old;
+  old.version = 1;
+  old.opacity = 77;
+  check(old.migrate(), "a v1 config is migrated");
+  check(old.version == bitematica::mod::Config::kCurrentVersion, "the version is bumped");
+  check(old.opacity == 77, "a carried-over field keeps its value");
+
+  bitematica::mod::Config fresh;
+  check(!fresh.migrate(), "a current config is not migrated");
 }
 
 void testConfigRoundTrip() {
@@ -413,6 +449,23 @@ void testConfigRoundTrip() {
   check(parsed.ghostPlacement == true, "bool true survives");
   check(parsed.maxRenderBlocks == 12345, "int survives");
   check(parsed.lastLoadedFile == original.lastLoadedFile, "quoted string survives");
+
+  // The Phase B float fields must survive too (the scanner must distinguish them from ints).
+  bitematica::mod::Config floats;
+  floats.showOutlines = false;
+  floats.outlineWidth = 2.5f;
+  floats.polygonOffsetFactor = -3.0f;
+  floats.polygonOffsetUnits = -4.5f;
+  bitematica::mod::Config floatsParsed;
+  check(bitematica::mod::JsonConfig::parse(
+            bitematica::mod::JsonConfig::serialize(floats), floatsParsed, error),
+        std::string("float config parses back: ") + error);
+  check(!floatsParsed.showOutlines, "showOutlines survives");
+  check(std::fabs(floatsParsed.outlineWidth - 2.5f) < 1e-5f, "outlineWidth survives");
+  check(std::fabs(floatsParsed.polygonOffsetFactor + 3.0f) < 1e-5f,
+        "polygonOffsetFactor survives");
+  check(std::fabs(floatsParsed.polygonOffsetUnits + 4.5f) < 1e-5f,
+        "polygonOffsetUnits survives");
 
   // A malformed config must be reported, not silently accepted.
   bitematica::mod::Config ignored;
@@ -466,14 +519,13 @@ int main() {
   testLegacySchematic();
   testStructure();
   testDetection();
-  testCameraProjection();
-  testMeshBuildsAndCulls();
-  testMeshTruncation();
   testToolbarHitTest();
+  testToolbarScaleAndTouchFloor();
   testControllerNavigation();
-  testOverlayCommands();
-  testHiddenModeDrawsNoMesh();
+  testChromeCommands();
+  testChromeNeverDrawsSchematicGeometry();
   testConfigNormalize();
+  testConfigMigration();
   testConfigRoundTrip();
   testStructureExportRoundTrip();
   testLibraryScan();

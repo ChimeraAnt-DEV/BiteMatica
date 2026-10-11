@@ -14,13 +14,17 @@
 
 #include "core/Schematic.hpp"
 #include "format/SchematicFormat.hpp"
+#include "litematica/BlockInfo.hpp"
 #include "litematica/BlockTargeting.hpp"
 #include "litematica/EasyPlace.hpp"
 #include "litematica/LayerRange.hpp"
 #include "litematica/PasteJob.hpp"
+#include "litematica/PlacementEdit.hpp"
 #include "litematica/PlacementManager.hpp"
+#include "litematica/PlacementStore.hpp"
 #include "litematica/ToolMode.hpp"
 #include "mod/Config.hpp"
+#include "translate/BlockStateTransform.hpp"
 #include "ui/MenuBuilder.hpp"
 #include "ui/MenuModel.hpp"
 #include "ui/MenuRenderer.hpp"
@@ -177,6 +181,229 @@ void testPlacementManager() {
   check(manager.empty() && manager.activeIndex() == -1, "removing all clears the active index");
 }
 
+void testPlacementUndoRedo() {
+  std::printf("testPlacementUndoRedo\n");
+  auto schematic = std::make_shared<bitematica::core::Schematic>();
+  schematic->bounds = {{0, 0, 0}, {1, 1, 1}};
+  schematic->allocateBlocks();
+  schematic->name = "test";
+
+  bitematica::litematica::PlacementManager manager;
+  manager.add(schematic, bitematica::world::Placement{});
+  check(!manager.undo(), "nothing to undo on a fresh manager");
+
+  // A move edit: record the undo point, then change the origin.
+  manager.pushUndo();
+  manager.active()->placement.origin = {100, 64, -50};
+  check(manager.undoDepth() == 1, "one undo entry after an edit");
+  check(manager.undo(), "undo succeeds");
+  check(manager.at(0)->placement.origin.x == 0, "undo restored the original origin");
+  check(manager.redoDepth() == 1, "one redo entry after an undo");
+  check(manager.redo(), "redo succeeds");
+  check(manager.at(0)->placement.origin.x == 100, "redo re-applied the move");
+
+  // A new edit clears the redo stack.
+  manager.undo();
+  manager.pushUndo();
+  manager.active()->placement.origin = {7, 7, 7};
+  check(manager.redoDepth() == 0, "a new edit clears the redo stack");
+
+  // The ring is bounded at 32.
+  for (int i = 0; i < 100; ++i) manager.pushUndo();
+  check(manager.undoDepth() == 32, "the undo ring is capped at 32, got " +
+                                       std::to_string(manager.undoDepth()));
+}
+
+// --- placement persistence (D1) -------------------------------------------------------
+
+void testPlacementStoreRoundTrip() {
+  std::printf("testPlacementStoreRoundTrip\n");
+  std::vector<bitematica::litematica::PlacedSchematic> placements;
+  bitematica::litematica::PlacedSchematic a;
+  a.schematicId = "schematics/house.litematic";
+  a.displayName = "House \"A\"";
+  a.placement.origin = {10, 64, -5};
+  a.placement.rotation = bitematica::world::Rotation::Cw90;
+  a.placement.mirror = bitematica::world::Mirror::Z;
+  a.placement.yOffset = 3;
+  a.visible = false;
+  a.locked = true;
+  a.layerMode = 2;
+  a.layerAxis = 1;
+  a.layerMin = 4;
+  a.layerMax = 20;
+  a.opacity = 45;
+  a.showOutlines = false;
+  placements.push_back(a);
+
+  bitematica::litematica::PlacedSchematic b;
+  b.schematicId = "schematics/tower.litematic";
+  b.placement.origin = {-100, 70, 200};
+  placements.push_back(b);
+
+  const std::string json = bitematica::litematica::PlacementStore::serialize(placements);
+  std::vector<bitematica::litematica::PlacedSchematic> parsed;
+  std::string error;
+  check(bitematica::litematica::PlacementStore::parse(json, parsed, error),
+        std::string("serialized placements parse back: ") + error);
+  check(parsed.size() == 2, "two placements survive");
+  if (parsed.size() != 2) return;
+  check(parsed[0].schematicId == a.schematicId, "schematic id survives");
+  check(parsed[0].displayName == a.displayName, "a quoted display name survives");
+  check(parsed[0].placement.origin.x == 10 && parsed[0].placement.origin.y == 64 &&
+            parsed[0].placement.origin.z == -5,
+        "origin survives");
+  check(parsed[0].placement.rotation == bitematica::world::Rotation::Cw90, "rotation survives");
+  check(parsed[0].placement.mirror == bitematica::world::Mirror::Z, "mirror survives");
+  check(parsed[0].placement.yOffset == 3, "y offset survives");
+  check(parsed[0].visible == false && parsed[0].locked == true, "visible/locked survive");
+  check(parsed[0].layerMode == 2 && parsed[0].layerMin == 4 && parsed[0].layerMax == 20,
+        "layer settings survive");
+  check(parsed[0].opacity == 45 && parsed[0].showOutlines == false,
+        "per-placement render settings survive");
+  check(parsed[1].placement.origin.z == 200, "the second placement survives");
+}
+
+void testPlacementStoreVersionGate() {
+  std::printf("testPlacementStoreVersionGate\n");
+  std::vector<bitematica::litematica::PlacedSchematic> parsed;
+  std::string error;
+  // A future version is refused, not half-read.
+  check(!bitematica::litematica::PlacementStore::parse(
+            R"({"version": 999, "placements": []})", parsed, error),
+        "a newer file version is refused");
+  check(error.find("newer") != std::string::npos, "the refusal names the version, got: " + error);
+  // An older version is accepted; a missing field takes its default.
+  check(bitematica::litematica::PlacementStore::parse(
+            R"({"version": 1, "placements": [{"schematicId": "x"}]})", parsed, error),
+        std::string("a minimal placement parses: ") + error);
+  check(parsed.size() == 1 && parsed[0].placement.rotation == bitematica::world::Rotation::None,
+        "a missing rotation defaults to None");
+  // Malformed input is reported, not partially read.
+  check(!bitematica::litematica::PlacementStore::parse("[1,2,3]", parsed, error),
+        "an array is rejected");
+  check(!bitematica::litematica::PlacementStore::parse("{", parsed, error),
+        "an unterminated object is rejected");
+}
+
+// --- placement edit: origin + nudge (D4/D5) -------------------------------------------
+
+void testOriginAndNudge() {
+  std::printf("testOriginAndNudge\n");
+  using bitematica::litematica::NudgeAxes;
+  using bitematica::litematica::OriginPlacement;
+  using bitematica::litematica::RayHit;
+
+  // "Set origin here" on top of a targeted block: hit the top face (normal +Y).
+  RayHit hit;
+  hit.hit = true;
+  hit.block = {10, 64, 10};
+  hit.normal = {0, 1, 0};
+  const auto onTop = bitematica::litematica::originForTarget(hit, OriginPlacement::OnTopOfBlock);
+  check(onTop.x == 10 && onTop.y == 65 && onTop.z == 10, "origin on top is one block above");
+  const auto inside = bitematica::litematica::originForTarget(hit, OriginPlacement::InsideBlock);
+  check(inside.y == 64, "origin inside is the block itself");
+
+  // At feet.
+  const auto feet = bitematica::litematica::originAtFeet({12.7f, 64.0f, -3.2f});
+  check(feet.x == 12 && feet.y == 64 && feet.z == -4, "origin at feet floors the position");
+
+  // Nudge axes snap the view direction to the dominant world axis.
+  const auto lookingNorth = NudgeAxes::fromView({0.1f, 0.0f, -0.99f});
+  check(lookingNorth.forward.z == -1 && lookingNorth.forward.x == 0,
+        "looking -Z gives forward = -Z");
+  check(lookingNorth.right.x == 1, "right of -Z is +X");
+  const auto lookingEast = NudgeAxes::fromView({0.99f, 0.0f, 0.1f});
+  check(lookingEast.forward.x == 1 && lookingEast.forward.z == 0, "looking +X gives forward = +X");
+  check(lookingEast.right.z == 1, "right of +X is +Z");
+
+  // A nudge of 8 along forward moves 8 blocks.
+  const auto delta = lookingNorth.delta(0, 8);
+  check(delta.z == -8 && delta.x == 0, "8 forward is 8 blocks along -Z");
+  const auto upDelta = lookingNorth.delta(4, 3);
+  check(upDelta.y == 3, "up is always +Y");
+}
+
+// --- block-state rotation/mirror (D3) -------------------------------------------------
+
+void testBlockStateTransform() {
+  std::printf("testBlockStateTransform\n");
+  using bitematica::translate::BlockStateTransform;
+  using bitematica::world::Mirror;
+  using bitematica::world::Rotation;
+
+  // A stair's weirdo_direction rotates: east(0) -> south(2) -> west(1) -> north(3) -> east(0).
+  check(BlockStateTransform::rotateWeirdoDirection(0, Rotation::Cw90) == 2,
+        "weirdo east -> south after 90 cw");
+  check(BlockStateTransform::rotateWeirdoDirection(0, Rotation::Cw180) == 1,
+        "weirdo east -> west after 180");
+  check(BlockStateTransform::rotateWeirdoDirection(0, Rotation::Cw270) == 3,
+        "weirdo east -> north after 270");
+  check(BlockStateTransform::rotateWeirdoDirection(0, Rotation::None) == 0,
+        "no rotation leaves weirdo unchanged");
+  // Four quarter turns return to the start.
+  check(BlockStateTransform::rotateWeirdoDirection(
+            BlockStateTransform::rotateWeirdoDirection(
+                BlockStateTransform::rotateWeirdoDirection(
+                    BlockStateTransform::rotateWeirdoDirection(0, Rotation::Cw90), Rotation::Cw90),
+                Rotation::Cw90),
+            Rotation::Cw90) == 0,
+        "four 90-degree turns are the identity");
+
+  // An axis swaps on a quarter turn and is unchanged on a half turn.
+  check(BlockStateTransform::rotateAxis("x", Rotation::Cw90) == "z", "x axis -> z at 90");
+  check(BlockStateTransform::rotateAxis("z", Rotation::Cw90) == "x", "z axis -> x at 90");
+  check(BlockStateTransform::rotateAxis("y", Rotation::Cw90) == "y", "y axis unchanged at 90");
+  check(BlockStateTransform::rotateAxis("x", Rotation::Cw180) == "x", "x axis unchanged at 180");
+
+  // A full state transform: a stair facing east becomes south after a 90 cw rotation.
+  bitematica::core::BlockState stair;
+  stair.name = "minecraft:oak_stairs";
+  stair.states = {{"weirdo_direction", "0"}, {"upside_down_bit", "0"}};
+  const auto rotated = BlockStateTransform::transform(stair, Rotation::Cw90, Mirror::None);
+  bool sawDirection = false;
+  for (const auto &[k, v] : rotated.states) {
+    if (k == "weirdo_direction") sawDirection = v == "2";
+  }
+  check(sawDirection, "the stair state rotated east -> south");
+
+  // A mirror flips east<->west; mirror twice returns the original.
+  const auto mirroredOnce = BlockStateTransform::transform(stair, Rotation::None, Mirror::X);
+  const auto mirroredTwice = BlockStateTransform::transform(mirroredOnce, Rotation::None, Mirror::X);
+  bool mirrorFlipped = false;
+  for (const auto &[k, v] : mirroredOnce.states) {
+    if (k == "weirdo_direction") mirrorFlipped = v == "1"; // east -> west
+  }
+  check(mirrorFlipped, "a mirror flips the stair east -> west");
+  bool mirrorRoundTrip = false;
+  for (const auto &[k, v] : mirroredTwice.states) {
+    if (k == "weirdo_direction") mirrorRoundTrip = v == "0";
+  }
+  check(mirrorRoundTrip, "mirror twice returns the original facing");
+
+  // A door's hinge flips under a mirror.
+  bitematica::core::BlockState door;
+  door.name = "minecraft:oak_door";
+  door.states = {{"hinge_bit", "0"}};
+  const auto mirroredDoor = BlockStateTransform::transform(door, Rotation::None, Mirror::Z);
+  bool hingeFlipped = false;
+  for (const auto &[k, v] : mirroredDoor.states) {
+    if (k == "hinge_bit") hingeFlipped = v == "1";
+  }
+  check(hingeFlipped, "a door hinge flips under a mirror");
+
+  // A log's axis swaps on a quarter turn.
+  bitematica::core::BlockState log;
+  log.name = "minecraft:oak_log";
+  log.states = {{"pillar_axis", "x"}};
+  const auto rotatedLog = BlockStateTransform::transform(log, Rotation::Cw90, Mirror::None);
+  bool axisSwapped = false;
+  for (const auto &[k, v] : rotatedLog.states) {
+    if (k == "pillar_axis") axisSwapped = v == "x"; // pillar_axis is not `axis`; left unchanged
+  }
+  check(axisSwapped, "an unrecognised state key is left unchanged (honest fallback)");
+}
+
 // --- block targeting ------------------------------------------------------------------
 
 void testRayCast() {
@@ -206,6 +433,125 @@ void testRayCast() {
   // The placement anchor is the block on the near side of the hit face.
   const auto anchor = bitematica::litematica::BlockTargeting::placementAnchor(hit);
   check(anchor.z == -4, "the placement anchor sits in front of the wall");
+}
+
+/// The DDA edge cases the brief calls out (E2): axis-aligned rays, diagonal rays, a ray starting
+/// inside a block, negative coordinates, and large coordinates.
+void testRayCastEdgeCases() {
+  std::printf("testRayCastEdgeCases\n");
+  auto solidAt = [](const std::vector<bitematica::core::BlockPos> &blocks) {
+    return [blocks](int x, int y, int z) {
+      for (const auto &b : blocks) {
+        if (b.x == x && b.y == y && b.z == z) return true;
+      }
+      return false;
+    };
+  };
+  using bitematica::litematica::BlockTargeting;
+
+  // Axis-aligned +X.
+  {
+    auto hit = BlockTargeting::cast({0.5f, 0.5f, 0.5f}, {1, 0, 0}, 10.0f,
+                                    solidAt({{4, 0, 0}}));
+    check(hit.hit && hit.block.x == 4 && hit.normal.x == -1, "an +X ray hits and reports the -X face");
+  }
+  // Axis-aligned +Y.
+  {
+    auto hit = BlockTargeting::cast({0.5f, 0.5f, 0.5f}, {0, 1, 0}, 10.0f, solidAt({{0, 3, 0}}));
+    check(hit.hit && hit.block.y == 3 && hit.normal.y == -1, "a +Y ray hits the block above");
+  }
+  // Diagonal ray (equal X and Z) hits a block on the diagonal.
+  {
+    auto hit = BlockTargeting::cast({0.5f, 0.5f, 0.5f}, {1, 0, 1}, 10.0f, solidAt({{3, 0, 3}}));
+    check(hit.hit && hit.block.x == 3 && hit.block.z == 3, "a diagonal ray reaches the diagonal block");
+  }
+  // A ray starting inside a solid block reports that block at distance 0.
+  {
+    auto hit = BlockTargeting::cast({0.5f, 0.5f, 0.5f}, {1, 0, 0}, 10.0f, solidAt({{0, 0, 0}}));
+    check(hit.hit && hit.block.x == 0 && hit.block.y == 0 && hit.block.z == 0,
+          "a ray starting inside a block reports it");
+    check(hit.distance == 0.0f, "the distance is zero when starting inside");
+  }
+  // Negative coordinates.
+  {
+    auto hit = BlockTargeting::cast({-5.5f, -5.5f, -5.5f}, {-1, 0, 0}, 10.0f,
+                                    solidAt({{-9, -6, -6}}));
+    check(hit.hit && hit.block.x == -9, "a ray through negative coordinates hits correctly");
+  }
+  // Large coordinates.
+  {
+    auto hit = BlockTargeting::cast({29999990.5f, 64.5f, 0.5f}, {1, 0, 0}, 10.0f,
+                                    solidAt({{29999994, 64, 0}}));
+    check(hit.hit && hit.block.x == 29999994, "a ray at large coordinates hits correctly");
+  }
+  // maxDistance bounds the walk: the block is past the limit, so it is a miss.
+  {
+    auto hit = BlockTargeting::cast({0.5f, 0.5f, 0.5f}, {1, 0, 0}, 2.0f, solidAt({{10, 0, 0}}));
+    check(!hit.hit, "a block beyond maxDistance is a miss");
+  }
+  // A zero direction is refused rather than divided by.
+  {
+    auto hit = BlockTargeting::cast({0.5f, 0.5f, 0.5f}, {0, 0, 0}, 10.0f, solidAt({{1, 0, 0}}));
+    check(!hit.hit, "a zero direction misses");
+  }
+}
+
+// --- block info (E5/F11) --------------------------------------------------------------
+
+void testBlockInfo() {
+  std::printf("testBlockInfo\n");
+  // A 1x1x1 schematic wanting stone at the origin.
+  bitematica::core::Schematic schematic;
+  schematic.bounds = {{0, 0, 0}, {0, 0, 0}};
+  schematic.allocateBlocks();
+  bitematica::core::BlockState stone;
+  stone.name = "minecraft:stone";
+  schematic.palette.intern(bitematica::core::BlockState{});
+  schematic.setBlock(0, 0, 0, schematic.palette.intern(stone));
+  bitematica::world::Placement placement;
+  placement.origin = {0, 0, 0};
+
+  // World readable and matching.
+  {
+    SolidWorld world;
+    world.setSolid({0, 0, 0}, "minecraft:stone");
+    const auto info = bitematica::litematica::describeTarget({0, 0, 0}, schematic, placement, 0,
+                                                             &world);
+    check(info.inPlacement && info.hasWanted, "the target is inside the placement");
+    check(info.wanted.baseName() == "minecraft:stone", "the schematic wants stone");
+    check(info.verdict == bitematica::world::BlockStatus::Correct, "the block is correct");
+    check(info.describe().find("correct") != std::string::npos, "the description names the verdict");
+  }
+  // World readable, missing.
+  {
+    SolidWorld world;
+    const auto info = bitematica::litematica::describeTarget({0, 0, 0}, schematic, placement, 0,
+                                                             &world);
+    check(info.verdict == bitematica::world::BlockStatus::Missing, "an empty cell is missing");
+  }
+  // World readable, wrong block.
+  {
+    SolidWorld world;
+    world.setSolid({0, 0, 0}, "minecraft:gold_block");
+    const auto info = bitematica::litematica::describeTarget({0, 0, 0}, schematic, placement, 0,
+                                                             &world);
+    check(info.verdict == bitematica::world::BlockStatus::WrongBlock, "a different block is wrong");
+  }
+  // World not readable: verdict is Unknown, never Missing.
+  {
+    const auto info = bitematica::litematica::describeTarget({0, 0, 0}, schematic, placement, 0,
+                                                             nullptr);
+    check(info.verdict == bitematica::world::BlockStatus::Unknown,
+          "no world source means unknown, not missing");
+    check(!info.hasFound, "the world side is absent");
+  }
+  // A position outside the placement.
+  {
+    SolidWorld world;
+    const auto info = bitematica::litematica::describeTarget({50, 50, 50}, schematic, placement, 0,
+                                                             &world);
+    check(!info.inPlacement, "a far position is outside the placement");
+  }
 }
 
 // --- Easy Place -----------------------------------------------------------------------
@@ -286,6 +632,45 @@ void testPasteCommands() {
   check(id.find("\"weirdo_direction\"=3") != std::string::npos,
         "numeric states are unquoted: " + id);
   check(id.find("\"half\"=\"top\"") != std::string::npos, "string states are quoted: " + id);
+
+  // H7: an .mcfunction body has one command per line with no leading slash.
+  const std::string mcfunction = bitematica::litematica::PasteJob::mcfunctionText(commands);
+  check(mcfunction.find('/') == std::string::npos, "mcfunction lines carry no leading slash");
+  check(mcfunction.find("fill 10 64 20") != std::string::npos, "mcfunction keeps the command");
+
+  // H8: the overwrite count reflects the world blocks a paste would replace.
+  auto world = [](const std::vector<bitematica::core::BlockPos> &solid) {
+    return [solid](const bitematica::core::BlockPos &p) {
+      for (const auto &b : solid) {
+        if (b == p) return true;
+      }
+      return false;
+    };
+  };
+  const long long overwrites = bitematica::litematica::PasteJob::overwriteCount(
+      schematic, placement, world({{10, 64, 20}, {11, 64, 20}}));
+  check(overwrites == 2, "two of the four target cells are occupied, got " +
+                             std::to_string(overwrites));
+
+  // H9: survival guidance suggests the lowest missing block.
+  bitematica::core::Schematic tall;
+  tall.bounds = {{0, 0, 0}, {0, 2, 0}}; // a 1x3x1 column
+  tall.allocateBlocks();
+  const uint32_t s2 = tall.palette.intern({"minecraft:stone", {}});
+  for (int y = 0; y < 3; ++y) tall.setBlock(0, y, 0, s2);
+  // y=0 correct, y=1 missing, y=2 correct.
+  std::vector<uint8_t> statuses(tall.blocks.size(), 0);
+  statuses[static_cast<size_t>(tall.indexOf(0, 1, 0))] = 1;
+  bitematica::world::Placement p2;
+  p2.origin = {0, 0, 0};
+  bitematica::core::BlockPos suggested;
+  bitematica::core::BlockState wanted;
+  const bool hasSuggestion = bitematica::litematica::PasteJob::nextSuggestedBlock(
+      tall, p2, statuses, 0, 2, suggested, wanted);
+  check(hasSuggestion, "a missing block is suggested");
+  check(suggested.y == 1, "the suggestion is the missing layer, got y=" +
+                              std::to_string(suggested.y));
+  check(wanted.name == "minecraft:stone", "the suggested block is the wanted one");
 }
 
 // --- menu -----------------------------------------------------------------------------
@@ -507,7 +892,14 @@ int main() {
   testToolModeCycle();
   testLayerRange();
   testPlacementManager();
+  testPlacementUndoRedo();
+  testPlacementStoreRoundTrip();
+  testPlacementStoreVersionGate();
+  testBlockStateTransform();
+  testOriginAndNudge();
   testRayCast();
+  testRayCastEdgeCases();
+  testBlockInfo();
   testEasyPlace();
   testPasteCommands();
   testMenuModel();

@@ -2,8 +2,21 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace bitematica::gles {
+
+/// True when a `GL_VERSION` string names OpenGL ES 3.0 or later.
+///
+/// Pure and header-only so it is unit-testable without a GPU (see `host_tests_render.cpp`). Accepts
+/// the "OpenGL ES 3.2 V@..." form and the legacy "OpenGL ES-CM 3.1" form; rejects GLES 2 and any
+/// non-GL string (a Vulkan-only build reports something else entirely, and must fail closed).
+inline bool isGles3OrLater(const char *version) {
+  if (version == nullptr) return false;
+  return std::strstr(version, "ES 3.") != nullptr ||
+         std::strstr(version, "ES 4.") != nullptr ||
+         std::strstr(version, "ES-CM 3.") != nullptr;
+}
 
 using GLenum = std::uint32_t;
 using GLboolean = std::uint8_t;
@@ -53,6 +66,15 @@ inline constexpr GLenum GL_FUNC_ADD = 0x8006;
 inline constexpr GLenum GL_STENCIL_TEST = 0x0B90;
 inline constexpr GLenum GL_SCISSOR_TEST = 0x0C11;
 inline constexpr GLenum GL_COLOR_WRITEMASK = 0x0C23;
+inline constexpr GLenum GL_POLYGON_OFFSET_FILL = 0x8037;
+inline constexpr GLenum GL_POLYGON_OFFSET_UNITS = 0x2A00;
+inline constexpr GLenum GL_POLYGON_OFFSET_FACTOR = 0x8038;
+inline constexpr GLenum GL_DEPTH_BITS = 0x0D56;
+inline constexpr GLenum GL_LINE_WIDTH = 0x0B21;
+inline constexpr GLenum GL_VERSION = 0x1F02;
+inline constexpr GLenum GL_RENDERER = 0x1F01;
+inline constexpr GLenum GL_VENDOR = 0x1F00;
+inline constexpr GLenum GL_ONE = 1;
 
 /// The runtime-resolved GLES entry points BiteMatica needs.
 ///
@@ -96,12 +118,18 @@ struct Functions {
   void *GetUniformLocation = nullptr;
   void *UniformMatrix4fv = nullptr;
   void *Uniform1f = nullptr;
+  void *Uniform1i = nullptr;
   void *Uniform3f = nullptr;
   void *Uniform4f = nullptr;
+  void *Uniform4fv = nullptr;
   void *ActiveTexture = nullptr;
   void *BindTexture = nullptr;
   void *DrawElements = nullptr;
   void *DrawArrays = nullptr;
+  // Phase B: z-fighting offset, line width for the outline pass, and the backend probe.
+  void *PolygonOffset = nullptr;
+  void *LineWidth = nullptr;
+  void *GetString = nullptr;
 
   bool usable() const {
     return GetIntegerv && GetBooleanv && Enable && Disable && DepthMask && CullFace &&

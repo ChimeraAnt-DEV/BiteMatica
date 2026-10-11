@@ -51,15 +51,33 @@ It is a *bite-sized Litematica for Bedrock* — rebuilt from the ground up for a
 
 Detection is by **content first**, not the file extension: BiteMatica decompresses the file, reads its NBT, and inspects the root compound to decide what it is holding. A `.litematic` renamed to `.schem` still opens. A file that is not a schematic fails with a specific reason ("schem is missing a Palette compound"), never with a vague "unsupported file".
 
-### Works on every 1.26 build
+### World-space, or nothing
 
-Two things have to hold for world-space rendering, and both are grounded in what the game actually does:
+BiteMatica draws the schematic **in the world**, and only in the world. There is no screen-space
+"software overlay" mode: if the mod cannot draw in world space it draws **nothing** and says why on
+the status line. A schematic projected into 2D is not Litematica, so the mod will not pretend it is.
 
-**A per-frame point on the render thread.** BiteMatica hooks **`eglSwapBuffers`**, which every GLES build calls exactly once per frame with the context current, and whose signature the EGL standard fixes. If the game has not mapped a GLES library when the mod enables, the hook is retried on the next input, so it installs as soon as the game is live.
+Two things have to hold for world-space rendering:
 
-**The camera.** It is built from the **local player feed**, hooked on `ClientInstance`'s own local-player accessor — resolved by RTTI name, with the position and rotation read from the fields at `Actor+0x230` / `+0x238`. Those offsets are shared by **1.26.33, 1.26.50 and 1.26.51**, which is exactly the range this targets. It is the same mechanism the launcher uses for its own in-world features, so it is proven rather than speculative.
+**A per-frame point on the render thread, with the GL context current.** BiteMatica uses the
+preloader's render callback (`pl/Render.hpp`) as the primary seam: it runs on the render thread once
+per frame and hands the mod the game's real camera matrices. If the running preloader predates that
+API, BiteMatica falls back to hooking **`eglSwapBuffers`** (every GLES build calls it once per frame,
+and its signature is fixed by the EGL standard), which is version-independent. If neither is
+available the mod draws nothing and prints `World-space renderer unavailable: no render seam`.
 
-The status line reports the live state — which seam is active, whether the camera feed is live, and how many frames have drawn — so a failure is visible on screen instead of silent.
+**A camera.** With the SDK seam the camera comes from the game's own view/projection matrices. With
+the EGL fallback it comes from the **local player feed**, hooked on `ClientInstance`'s local-player
+accessor — resolved by RTTI name, with position and rotation read from the fields at `Actor+0x230` /
+`+0x238`, the same mechanism the launcher uses for its own in-world features.
+
+The status line always names the mode — `World-space GL (sdk, frame N, X sections, Y tris)` or the
+named failure — so the user is never left guessing whether the schematic is being drawn.
+
+> **Minimum preloader version.** World-space rendering needs the preloader's render API
+> (`pl/Render.hpp`), added in preloader-android commit `167226d`. GlowberryClient must pin a preloader
+> at or after that commit; see [`docs/BUMP_PRELOADER.md`](docs/BUMP_PRELOADER.md). On an older
+> preloader the mod still **loads** (the render symbols are weak) but draws nothing and says so.
 
 ### World-space rendering
 - The schematic is drawn as **real 3D geometry in the world**, not a screen-space projection — so it moves with the world as you walk, and it sits at a real position you can build toward.
@@ -108,8 +126,11 @@ Show **all layers**, a **single layer**, **all below**, **all above**, or a **ra
 The feature that makes a schematic tool actually useful: **compare the schematic to the live world** and colour every block by its state.
 - **Correct** (green), **Missing** (red, needs placing), **Wrong** (amber, wrong block), **Extra** (blue, should be removed).
 - The comparison is strict about block type but tolerant about states, because Bedrock's state names for the same block differ from Java's.
-- It is **fail-closed**: the mod resolves the game's block getter by RTTI vtable name (the same approach the SDK's own hooks use), and if the slot is not configured for your build, verification reports "the world is not readable" rather than inventing block states and colouring everything wrong.
-- **Per-build slot required.** There is no reliable way to discover the getter's vtable slot at runtime, and a wrong slot would fault the game thread, so it ships **off** (`verifyBlockSourceSlot: -1`). Once you have confirmed the slot for your game build — the same exercise the SDK's own hooks go through to add a new version — set it in the config and verification turns on. `AGENTS.md` records the procedure.
+- It is **fail-closed three times over**: a version gate (the slot is only used on a matching game version), a **confirmed reader** (the mod will not call a resolved address until a human has confirmed the slot and calling convention), and a **sanity probe** (the block under your feet must not be air; 400 blocks above must be). A reader that fails the probe is disabled for the session with a named reason rather than colouring the schematic wrong.
+- **Per-build slot required.** There is no reliable way to discover the getter's vtable slot at runtime, and a wrong slot would fault the game thread, so it ships **off** (`verifyBlockSourceSlot: -1`). The mod does not guess. Once you have confirmed the slot and ABI for your build, set them in the config and install the confirmed reader; `docs/FINDING_GETBLOCK.md` is the step-by-step guide, and `AGENTS.md` records the rule.
+- **Six verdicts, not four:** correct, missing, wrong block, wrong state, extra, and **unknown**. An unreadable block (an unloaded chunk) is `unknown` — never `missing` — so the mod never tells you to build a wall that already exists.
+- **Incremental scan:** a large schematic is verified at a configurable rate (`verifyBlocksPerFrame`, default 2000) so the frame never stalls.
+- **Mismatch display modes:** show all, only mismatches, or hide correct (the common build mode). Changing the mode is a shader uniform, not a remesh.
 
 ### World-anchored placements
 The schematic has a **world origin**, not a screen position. You can **move it to the player**, **rotate it in 90° steps**, **mirror it**, and **offset it vertically** — the toolbar has a button for each.
@@ -142,7 +163,7 @@ Press **S** (the *Export* button) and the loaded schematic is written to the mod
 | Glyph | Action | What it does |
 | --- | --- | --- |
 | `<` `>` | Previous / next file | Cycles the schematics in the mod's `schematics/` folder |
-| `M` | Render mode | Overlay → Skeleton → Hidden |
+| `M` | Render mode | Translucent → Skeleton → Hidden |
 | `L` | Material list | Shows or hides the block-count panel |
 | `Q` `E` | Rotate left / right | Turns the view 15° (also **L1** / **R1**) |
 | `+` `-` | Zoom in / out | Scales the projection |
@@ -163,7 +184,7 @@ Press **S** (the *Export* button) and the loaded schematic is written to the mod
 | `Tab` | Menu tab | Advances the menu page |
 
 ### Mod Menu integration
-BiteMatica registers a native Mod Menu module with a master toggle and live config: **Render Mode**, **Opacity**, **Layers**, **Material List**, **Ghost Placement**, and **Verify World**. Turning the module off clears the overlay instead of leaving stale geometry on screen.
+BiteMatica registers a native Mod Menu module with a master toggle and live config: **Render Mode**, **Opacity**, **Layers**, **Material List**, **Ghost Placement**, and **Verify World**. Turning the module off stops drawing the schematic instead of leaving stale geometry on screen.
 
 ---
 
@@ -231,14 +252,26 @@ Everything that can be wrong without a GPU is pure C++ with **no Android depende
 ```bash
 python3 test/make_fixtures.py test/fixtures
 cmake -S . -B build/host -DCMAKE_BUILD_TYPE=Release
-cmake --build build/host --target bitematica_tests bitematica_world_tests
-./build/host/bitematica_tests        # formats, mesh projector, toolbar, controller, config
-./build/host/bitematica_world_tests  # placement transforms, mesher, verification, translation
+cmake --build build/host --target bitematica_tests bitematica_world_tests \
+    bitematica_litematica_tests bitematica_render_tests
+./build/host/bitematica_tests          # formats, chrome, config, migration
+./build/host/bitematica_world_tests    # placement, mesher, verification, translation, writers
+./build/host/bitematica_litematica_tests  # tool modes, raycast, paste, placements, menus
+./build/host/bitematica_render_tests   # render math: camera-relative, culling, shapes, colours
 ```
 
-**242 checks across the three suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
+**~470 checks across the four suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
 
-The world suite covers the parts most likely to be subtly wrong and hardest to debug on a device: the placement transform (every rotation × mirror round-trips `toWorld`/`toLocal`), the mesher (a solid 3×3×3 collapses to a handful of merged quads, and interior faces are culled), placement-local frustum culling (the local→world transform is pinned against the shader's own rotation signs), verification (missing/wrong/extra counted against a fake world), the Java→Bedrock direction inversion, and the `.litematic` write→read round trip.
+The suites cover the parts most likely to be subtly wrong and hardest to debug on a device: the placement transform (every rotation × mirror round-trips `toWorld`/`toLocal`), the mesher (a solid 3×3×3 collapses to a handful of merged quads, and interior faces are culled), placement-local frustum culling, verification (correct/missing/wrong/extra/unknown counted against a fake world), the Java→Bedrock direction inversion, the `.litematic` write→read round trip, camera-relative precision at ±3e7, the transform-applied-once rule, the mirror baked into the mesh, and the fail-closed world-source gate and probe.
+
+A benchmark target prints mesher/verifier timings:
+
+```bash
+cmake --build build/host --target bitematica_bench
+./build/host/bitematica_bench
+```
+
+CI additionally runs `test/link_check.sh` (the `.so` has no strong `pl::render::` reference, so it loads on an old preloader), `test/hud_geometry_guard.sh` (no schematic geometry can go through HUD commands) and `tools/check_config_sync.py` (the packaged config and schema agree).
 
 ---
 
@@ -267,8 +300,8 @@ Settings live in `config/config.json` inside the installed mod. The launcher's c
 
 | Key | Meaning |
 | --- | --- |
-| `renderMode` | `0` overlay · `1` skeleton · `2` hidden |
-| `opacity` | overlay alpha in percent (10–100) |
+| `renderMode` | `0` translucent · `1` skeleton · `2` hidden |
+| `opacity` | ghost alpha in percent (10–100) |
 | `onlyExposed` | skip fully enclosed blocks when meshing |
 | `maxRenderBlocks` | per-frame meshing cap (500–250000) |
 | `maxTriangles` | mesher triangle budget (1000–4000000) |
@@ -279,7 +312,7 @@ Settings live in `config/config.json` inside the installed mod. The launcher's c
 | `toolbarX`/`toolbarY` | toolbar anchor in HUD pixels |
 | `materialX`/`materialY` | material-panel anchor in HUD pixels |
 
-A hand-edited value that is out of range is **clamped** on load, so a typo cannot take the overlay off screen.
+A hand-edited value that is out of range is **clamped** on load, so a typo cannot take the toolbar off screen.
 
 ---
 
@@ -308,10 +341,47 @@ bitematica_core   (host-testable, no Android)
 A schematic is normalized into one shape — a palette plus one palette index per block — so the mesher, the verifier and the material list never know or care which dialect it came from.
 
 ### Honest engineering notes
-- **Two drawing paths, deliberately.** World-space geometry is GL (depth-tested, occluded by terrain); the toolbar and material panel are HUD commands (always on top). A toolbar that terrain could occlude would not be a toolbar.
-- **The per-frame render callback is a new public SDK API.** Mods had no way to run code on the render thread with the GL context, so it was added to the preloader (`pl/Render.hpp`) rather than worked around. The mod does not invent a hook it cannot guarantee.
+- **Two drawing paths, deliberately — and only two.** The schematic is world-space GL (depth-tested, occluded by terrain); the toolbar, menu and material panel are HUD commands (always on top). The HUD command vocabulary has **no geometry primitive at all**, so schematic geometry cannot be drawn through it even by mistake. A `test/hud_geometry_guard.sh` check and a unit test enforce this.
+- **No screen-space fallback.** If the world-space renderer is unavailable the mod draws nothing and names the reason on the status line. It never substitutes a 2D projection, because that would not be Litematica.
+- **The per-frame render callback is a public SDK API.** Mods had no way to run code on the render thread with the GL context, so it was added to the preloader (`pl/Render.hpp`) rather than worked around. The mod does not invent a hook it cannot guarantee.
 - **Fail-closed everywhere.** A missing file, a malformed manifest, a truncated archive, an unreadable config, an unresolved camera, an unverified block getter: each becomes a named, user-visible reason in the status line, never a crash and never a guessed value.
 - **The demo that ships is real.** The bundled hut is written by the same encoders the tests use, and it is loaded back through the production reader before packaging.
+
+---
+
+## Troubleshooting
+
+The status line always names the mode or the failure. Find the message here.
+
+| Status line says | What it means | Fix |
+| --- | --- | --- |
+| `World-space GL (sdk, ...)` | Working: the preloader render callback is live. | Nothing. |
+| `World-space GL (egl, ...)` | Working: the EGL fallback seam is live. | Nothing. |
+| `World-space renderer unavailable: no render seam - update GlowberryClient` | The preloader has no render API and EGL is not hooked. | Pin the preloader at or after `167226d` and rebuild the client — `docs/BUMP_PRELOADER.md`. |
+| `world-space renderer unavailable: <GL_VERSION>` | The backend is not GLES 3.0+. | The mod draws nothing on a non-GL backend; report the GL version string. |
+| `Verification unavailable: BlockSource::getBlock slot is not set...` | The block getter is unconfigured. | Confirm the slot for your build — `docs/FINDING_GETBLOCK.md` — then set `verifyBlockSourceSlot` and `verifyGameVersionTag`. |
+| `world source not verified for this game version` | The version gate is closed. | Set `verifyGameVersionTag` to the running version. |
+| `world source probe failed: ...` | The confirmed reader returned implausible values. | The slot is likely wrong; re-check it against the disassembly. The source is off for the session. |
+| `Schematic refused: N blocks exceeds the M-block memory cap` | The schematic is above `maxSchematicBlocks`. | Raise the cap, or load a smaller build. |
+| `Load failed: ...` | The file could not be read. | The reason names the format problem (e.g. "schem is missing a Palette compound"). |
+| `World-space renderer unavailable` in the menu | Same as the status-line failure. | See above. |
+
+## Limitations
+
+- **Verified game versions.** World-space rendering needs a preloader at or after commit `167226d`
+  (`pl/Render.hpp`). The camera comes from the local-player feed, whose offsets are shared by
+  1.26.33 / 1.26.50 / 1.26.51. A build outside that set may work but is not verified.
+- **World verification needs a confirmed block getter.** The slot and calling convention are
+  build-specific and are never guessed; verification ships off until you confirm them
+  (`docs/FINDING_GETBLOCK.md`).
+- **Survival does not auto-place.** The mod highlights the next block to place and generates
+  commands; it never places blocks on its own.
+- **Paste is via commands or a structure file.** `/structure load` (cheats) or `/setblock`/`/fill`
+  files the player runs. Nothing touches the network.
+- **Textures are flat colours.** Tier 1 uses a data-driven colour table (`data/block_colors.json`),
+  not the game's texture atlas.
+- **Entities** (armor stands, item frames) are preserved in file round-trips but not verified or
+  rendered beyond a placeholder.
 
 ---
 

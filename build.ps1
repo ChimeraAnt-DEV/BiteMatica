@@ -101,6 +101,8 @@ python3 (Join-Path $Root "tools\pack_antegg.py") `
     --entry bin/libbitematica.so `
     --config (Join-Path $Root "packaging\config") `
     --schematics (Join-Path $Root "assets\schematics") `
+    --extra "data/block_colors.json=$(Join-Path $Root 'data\block_colors.json')" `
+    --extra "data/block_translation.json=$(Join-Path $Root 'data\block_translation.json')" `
     --out (Join-Path $DistDir "BiteMatica-$Version.antegg")
 
 Write-Host "==> Done: $DistDir\BiteMatica-$Version.antegg"

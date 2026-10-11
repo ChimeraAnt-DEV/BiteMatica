@@ -7,25 +7,24 @@
 #include "core/MaterialList.hpp"
 #include "core/Schematic.hpp"
 #include "mod/Config.hpp"
-#include "render/MeshBuilder.hpp"
-#include "render/ViewCamera.hpp"
 
 namespace bitematica::render {
 
 /// A neutral draw command, decoupled from the preloader's `pl::modmenu::DrawCommand`.
 ///
-/// Keeping the UI model in its own vocabulary is what lets the whole overlay layout —
-/// toolbar hit boxes, panel wrapping, mesh ordering — be unit-tested on a host build
-/// with no preloader present. The mod glue translates these one-for-one at submit time.
+/// This vocabulary is **UI chrome only** — the toolbar, the material panel and the status
+/// line. Schematic geometry is never drawn through it: that would be a screen-space
+/// "software overlay", which is not world-space rendering and is not this mod. World-space
+/// geometry goes through GL in `gles/SchematicRenderer`. Keeping the chrome model in its
+/// own vocabulary is what lets the layout — toolbar hit boxes, panel wrapping — be
+/// unit-tested on a host build with no preloader present.
 struct UiCommand {
-  enum class Kind { Rect, Triangle, Text };
+  enum class Kind { Rect, Text };
   Kind kind{Kind::Rect};
   float x{};
   float y{};
   float w{};
   float h{};
-  float x3{};
-  float y3{};
   uint32_t color{};
   float size{};
   std::string text;
@@ -34,18 +33,6 @@ struct UiCommand {
     UiCommand c;
     c.kind = Kind::Rect;
     c.x = x; c.y = y; c.w = w; c.h = h; c.color = color;
-    return c;
-  }
-  static UiCommand makeTriangle(const ScreenPoint &a, const ScreenPoint &b,
-                                const ScreenPoint &c3, uint32_t color,
-                                float size = 0.0f) {
-    UiCommand c;
-    c.kind = Kind::Triangle;
-    c.x = a.x; c.y = a.y;
-    c.w = b.x; c.h = b.y;
-    c.x3 = c3.x; c.y3 = c3.y;
-    c.color = color;
-    c.size = size;
     return c;
   }
   static UiCommand makeText(float x, float y, const std::string &value, uint32_t color,
@@ -86,6 +73,7 @@ struct ToolbarButton {
     ApplyTool,      // act with the current tool mode
     OpenMenu,       // open the in-game menu
     CycleMenuTab,   // switch menu tab
+    PanicToggle,    // J6: hide/show all rendering instantly
   };
   Action action{Action::CycleMode};
   std::string label;
@@ -97,11 +85,15 @@ struct ToolbarButton {
   bool highlighted{};
 };
 
-/// The schematic toolbar + material panel model and its draw-command output.
+/// The toolbar + material panel model and its draw-command output.
 ///
 /// One class owns both the widgets' geometry and the commands that render them, so a
 /// tap and the button it hits can never disagree: `layoutToolbar` is the single source
 /// of truth for where each button is, and `hitTest` walks exactly that list.
+///
+/// This class draws **chrome only**. There is no schematic-mesh path here by design: a
+/// schematic drawn as 2D HUD geometry is a screen-space projection, not the world-space
+/// ghost this mod exists to provide.
 class HudOverlay {
 public:
   static constexpr float kButtonSize = 40.0f;
@@ -115,17 +107,15 @@ public:
   static const ToolbarButton *hitTest(const std::vector<ToolbarButton> &buttons,
                                       float x, float y);
 
-  /// Builds every command for one frame: schematic mesh, toolbar, material panel.
-  static std::vector<UiCommand> buildCommands(
-      const core::Schematic &schematic, const mod::Config &config,
-      const ViewCamera &camera, const std::vector<ToolbarButton> &buttons,
-      const std::vector<core::MaterialEntry> &materials, const std::string &statusLine,
-      bool hasSchematic);
-
-  /// The mesh command list alone, for tests that do not want the chrome.
-  static std::vector<UiCommand> buildMeshCommands(const core::Schematic &schematic,
-                                                  const mod::Config &config,
-                                                  const ViewCamera &camera);
+  /// Builds every chrome command for one frame: toolbar, material panel, status line.
+  ///
+  /// @param materials the rows to show in the material panel
+  /// @param showMaterials whether the material panel is drawn at all (the panel is only
+  ///        meaningful once a schematic is loaded and its counts are known)
+  static std::vector<UiCommand> buildCommands(const mod::Config &config,
+                                              const std::vector<ToolbarButton> &buttons,
+                                              const std::vector<core::MaterialEntry> &materials,
+                                              const std::string &statusLine, bool showMaterials);
 
   static uint32_t applyOpacity(uint32_t argb, int opacityPercent);
 };

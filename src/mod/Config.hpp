@@ -26,7 +26,10 @@ enum class LayerMode : int {
 /// Defaults are chosen so that a fresh install draws a readable overlay with the
 /// toolbar already on screen and does not need the Mod Menu opened first.
 struct Config {
-  int version = 1;
+  /// The current config schema version. Bumped when a field's meaning changes; `migrate()` upgrades
+  /// an older file (L8) and keeps a backup.
+  static constexpr int kCurrentVersion = 2;
+  int version = kCurrentVersion;
 
   /// Master switch mirrored by the Mod Menu module toggle.
   bool enabled = true;
@@ -48,6 +51,11 @@ struct Config {
   int maxTriangles = 1500000;
   /// Distance beyond which sections are not drawn (0 disables distance culling).
   int renderDistance = 256;
+  /// Maximum number of blocks a schematic may have before it is refused (K6). A schematic above
+  /// this is not loaded, with a named error, rather than risking an out-of-memory crash.
+  long long maxSchematicBlocks = 32000000;
+  /// Maximum GPU sections uploaded per frame (K1), so a large mesh does not hitch the frame.
+  int uploadSectionsPerFrame = 2;
 
   /// Layer filter (item 10): all layers, a single layer, or a range.
   LayerMode layerMode = LayerMode::All;
@@ -55,15 +63,44 @@ struct Config {
   int layerMin = 0;
   int layerMax = 255;
 
+  /// Draw block-edge outlines over the ghost (Phase B8).
+  bool showOutlines = true;
+  /// Outline line width in pixels (the driver clamps it).
+  float outlineWidth = 1.5f;
+  /// Polygon offset for the filled ghost faces, to stop z-fighting with real block faces. Negative
+  /// pulls the ghost toward the camera. Configurable (Phase B7).
+  float polygonOffsetFactor = -1.0f;
+  float polygonOffsetUnits = -1.0f;
+
   /// Verification (item 9): colour missing/wrong/extra blocks instead of the schematic's own colour.
   bool verifyAgainstWorld = false;
   /// Whether to also scan air cells for stray world blocks (the "extra" status).
   bool verifyExtras = false;
+  /// Mismatch display mode (F6): 0 show all, 1 only mismatches, 2 hide correct.
+  int verifyMismatchMode = 0;
+  /// Blocks verified per frame (F5). A large schematic is scanned incrementally at this rate.
+  int verifyBlocksPerFrame = 2000;
   /// The `BlockSource::getBlock` primary-vtable slot for the running build, or -1 to leave
   /// verification off. There is no reliable way to discover this at runtime and a wrong slot faults
   /// the game thread, so it is a per-build constant a user sets once they have confirmed it. The
   /// default keeps the safe path: verification reports "world not readable" rather than guessing.
   int verifyBlockSourceSlot = -1;
+  /// The game version the slot above was verified against (F1). The world source is only enabled
+  /// when this matches the running game version, so a slot confirmed for one build is never used on
+  /// another. Empty means "not verified for any version".
+  std::string verifyGameVersionTag;
+
+  /// Panic toggle (J6): disable all rendering instantly without unloading. Off by default.
+  bool panicHidden = false;
+  /// Toolbar button scale (J4). 1.0 is the 40 px default; the minimum enforces a large-enough touch
+  /// target. Larger for a tablet, smaller only down to the accessibility floor.
+  float uiScale = 1.0f;
+  /// Text size scale for the status line and panels (J9).
+  float textScale = 1.0f;
+  /// High-contrast mode (J9): opaque backgrounds, maximum text contrast.
+  bool highContrast = false;
+  /// Mismatch palette preset (C6/J9): 0 default, 1 colour-blind, 2 high-contrast.
+  int palettePreset = 0;
 
   /// Toolbar anchor in HUD pixels (top-left of the toolbar's panel).
   int toolbarX = 24;
@@ -99,6 +136,25 @@ struct Config {
     if (outMax < outMin) outMax = outMin;
   }
 
+  /// Upgrades a config read from an older schema version (L8).
+  ///
+  /// The migration is field-by-field: a value the old version had and the new one still uses is
+  /// kept; a field whose meaning changed is converted; a field that did not exist takes its default
+  /// (already set by the struct). Returns true when the file was from an older version and was
+  /// upgraded, so the caller can back up the original and re-save.
+  bool migrate() {
+    if (version >= kCurrentVersion) {
+      version = kCurrentVersion;
+      return false;
+    }
+    // v1 -> v2: `renderMode` 0 used to mean a screen-space "overlay", which no longer exists. A
+    // config that asked for it now gets the world-space translucent mode (also 0), so nothing
+    // changes numerically; the migration only records the version bump. Kept explicit so a future
+    // real conversion has a home.
+    version = kCurrentVersion;
+    return true;
+  }
+
   /// Clamp all values that a hand-edited config could push out of range.
   void normalize() {
     if (opacity < 10) opacity = 10;
@@ -107,11 +163,30 @@ struct Config {
     if (maxRenderBlocks > 250000) maxRenderBlocks = 250000;
     if (maxTriangles < 1000) maxTriangles = 1000;
     if (maxTriangles > 4000000) maxTriangles = 4000000;
+    if (maxSchematicBlocks < 100000) maxSchematicBlocks = 100000;
+    if (uploadSectionsPerFrame < 1) uploadSectionsPerFrame = 1;
+    if (uploadSectionsPerFrame > 64) uploadSectionsPerFrame = 64;
     if (renderDistance < 0) renderDistance = 0;
     if (renderDistance > 1024) renderDistance = 1024;
     if (layerSingle < 0) layerSingle = 0;
     if (layerMin < 0) layerMin = 0;
     if (layerMax < layerMin) layerMax = layerMin;
+    if (outlineWidth < 0.5f) outlineWidth = 0.5f;
+    if (outlineWidth > 8.0f) outlineWidth = 8.0f;
+    if (polygonOffsetFactor < -8.0f) polygonOffsetFactor = -8.0f;
+    if (polygonOffsetFactor > 0.0f) polygonOffsetFactor = 0.0f;
+    if (polygonOffsetUnits < -16.0f) polygonOffsetUnits = -16.0f;
+    if (polygonOffsetUnits > 0.0f) polygonOffsetUnits = 0.0f;
+    if (verifyMismatchMode < 0 || verifyMismatchMode > 2) verifyMismatchMode = 0;
+    if (verifyBlocksPerFrame < 100) verifyBlocksPerFrame = 100;
+    if (verifyBlocksPerFrame > 200000) verifyBlocksPerFrame = 200000;
+    // The touch-target floor (J4): a scale below 1.2 would put buttons under 48 dp, which is the
+    // accessibility minimum, so it is clamped up rather than allowed.
+    if (uiScale < 1.2f) uiScale = 1.2f;
+    if (uiScale > 3.0f) uiScale = 3.0f;
+    if (textScale < 0.8f) textScale = 0.8f;
+    if (textScale > 2.5f) textScale = 2.5f;
+    if (palettePreset < 0 || palettePreset > 2) palettePreset = 0;
     // A slot of 0 or below means "unverified"; anything above the vtable's plausible size is
     // nonsense and is treated the same way.
     if (verifyBlockSourceSlot < 0 || verifyBlockSourceSlot > 512) verifyBlockSourceSlot = -1;

@@ -172,6 +172,30 @@ inline Mat4 placementLocalToWorld(const Vec3 &origin, float yawDegrees) {
   return out;
 }
 
+/// A copy of a view matrix with its translation column removed, leaving only the rotation.
+///
+/// This is the key to camera-relative rendering: `projection * rotation` is a world->clip matrix
+/// that consumes **camera-relative** coordinates (world − camera) and contains no large translation.
+/// Stripping the translation is exact — the rotation entries are copied unchanged — so there is no
+/// catastrophic cancellation, unlike computing `viewProjection * translate(camera)` in float.
+inline Mat4 viewRotationOnly(const Mat4 &view) {
+  Mat4 out = view;
+  out.m[12] = 0.0f;
+  out.m[13] = 0.0f;
+  out.m[14] = 0.0f;
+  return out;
+}
+
+/// Builds the camera-relative world->clip matrix `projection * rotation(view)`.
+///
+/// Uploaded as `uMvp`, it maps a **camera-relative** position `(world − camera)` to clip space. The
+/// relative position is computed on the CPU in double precision and converted to float, so it stays
+/// small and exact even when the world coordinate is ±30,000,000 — no large float offset ever enters
+/// the shader. This requires `view` and `projection` separately (the SDK provides both).
+inline Mat4 cameraRelativeViewProjection(const Mat4 &projection, const Mat4 &view) {
+  return Mat4::multiply(projection, viewRotationOnly(view));
+}
+
 /// Transforms a world point into the placement's local space (the inverse of the above).
 inline Vec3 worldToPlacementLocal(const Vec3 &origin, float yawDegrees, const Vec3 &world) {
   const float radians = yawDegrees * static_cast<float>(std::numbers::pi) / 180.0f;

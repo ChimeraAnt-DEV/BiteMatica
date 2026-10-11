@@ -29,6 +29,7 @@ public:
   static Tag string(const std::string &name, const std::string &value);
   static Tag intTag(const std::string &name, int64_t value);
   static Tag byteTag(const std::string &name, int value);
+  static Tag longTag(const std::string &name, int64_t value);
   static Tag floatTag(const std::string &name, double value);
 
 private:

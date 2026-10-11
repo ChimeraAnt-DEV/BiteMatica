@@ -43,9 +43,9 @@ CORE_SOURCES=(
   src/mesh/SectionMesher.cpp
   src/world/Verifier.cpp src/world/WorldSource.cpp src/world/Selection.cpp
   src/world/CheatPlacement.cpp
-  src/translate/BlockTranslation.cpp
+  src/translate/BlockTranslation.cpp src/translate/BlockStateTransform.cpp
   src/core/LiveMaterials.cpp
-  src/litematica/PasteJob.cpp src/litematica/EasyPlace.cpp
+  src/litematica/PasteJob.cpp src/litematica/EasyPlace.cpp src/litematica/PlacementStore.cpp
   src/render/GameCamera.cpp
   src/ui/MenuBuilder.cpp
   src/render/HudOverlay.cpp

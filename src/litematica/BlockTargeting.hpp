@@ -102,6 +102,21 @@ public:
     return core::BlockPos{hit.block.x + hit.normal.x, hit.block.y + hit.normal.y,
                           hit.block.z + hit.normal.z};
   }
+
+  /// The world-space box to highlight for a targeted block (E4), as an inclusive min/max in block
+  /// coordinates. A thin outline is drawn on this box (real-block target and schematic target use
+  /// different colours). Kept as pure arithmetic so the highlight geometry is testable without GL.
+  struct HighlightBox {
+    render::Vec3 min{};
+    render::Vec3 max{};
+  };
+
+  static HighlightBox highlightBox(const core::BlockPos &block) {
+    return HighlightBox{render::Vec3{static_cast<float>(block.x), static_cast<float>(block.y),
+                                     static_cast<float>(block.z)},
+                        render::Vec3{static_cast<float>(block.x + 1), static_cast<float>(block.y + 1),
+                                     static_cast<float>(block.z + 1)}};
+  }
 };
 
 } // namespace bitematica::litematica

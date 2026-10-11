@@ -2,7 +2,7 @@
 
 /**
  * @file SdkCompat.hpp
- * @brief Makes the mod load on preloader builds that predate the render API.
+ * @brief Makes the mod load on preloader builds that predate the render API, and fail closed there.
  *
  * The world-space renderer needs `pl/Render.hpp`, which was added to the preloader after the
  * commit GlowberryClient currently pins. A mod whose `.so` has an *undefined, non-weak* symbol that
@@ -11,8 +11,9 @@
  *
  * The fix is to declare the render API's entry points **weak**. A weak undefined symbol does not
  * fail `dlopen`; it resolves to null when the preloader lacks it. The mod then checks the pointers
- * at runtime and falls back to the software overlay (the HUD draw commands it has always used), so
- * the same `.AntEgg` runs on both an old and a new preloader.
+ * at runtime. When the render API is absent the mod **draws no schematic at all** and shows a named
+ * status message telling the user to update the launcher — it does not fall back to a screen-space
+ * overlay, because an overlay is not world-space rendering and would be a lie about what the mod is.
  *
  * The weak declarations must come *after* the real header is included so they attach the weak
  * attribute to the existing declarations rather than conflicting with them.
@@ -42,8 +43,9 @@ namespace bitematica::mod {
 /// Runtime capability probe for the preloader's render API.
 ///
 /// Every method checks the weak pointer before calling it, so a preloader without the render API
-/// simply reports "unavailable" and the caller uses the fallback. This is what lets one `.AntEgg`
-/// work on both preloader generations.
+/// simply reports "unavailable". The caller then draws nothing and says so on screen: there is no
+/// schematic fallback. This is what lets one `.AntEgg` load on both preloader generations while
+/// still only ever drawing the schematic in world space.
 class SdkRender {
 public:
   /// True when the running preloader exports the per-frame render callback API.

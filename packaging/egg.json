@@ -1,9 +1,9 @@
 {
   "name": "BiteMatica",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "author": "ChimeraAnt",
   "type": "native",
   "entry_point": "bin/libbitematica.so",
   "dependencies": [],
-  "description": "Client-side schematic loader and overlay for Minecraft Bedrock on Android. Reads Litematica, Sponge/WorldEdit, MCEdit and Bedrock structure files, draws an isometric overlay with a material list, and exports Bedrock .mcstructure files. Touch and controller friendly."
+  "description": "Client-side schematic mod for Minecraft Bedrock on Android: draws a loaded schematic in world space as depth-tested ghost blocks, with outlines, placements, layers, a live material list and world verification. Reads Litematica, Sponge/WorldEdit, MCEdit and Bedrock structure files. Touch and controller friendly."
 }
