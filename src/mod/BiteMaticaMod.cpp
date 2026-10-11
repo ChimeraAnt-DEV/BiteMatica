@@ -48,6 +48,7 @@
 #include "mod/SchematicLibrary.hpp"
 #include "render/HudOverlay.hpp"
 #include "render/MathTypes.hpp"
+#include "render/PlacementCull.hpp"
 #include "render/ViewCamera.hpp"
 #include "world/CheatPlacement.hpp"
 #include "world/Placement.hpp"
@@ -96,11 +97,15 @@ struct PendingMesh {
 /// An immutable snapshot of everything the mesher needs.
 ///
 /// The worker thread must never read the mod's live state: a schematic load or a rotate happening
-/// mid-mesh would otherwise race with it and crash. `rebuildMeshAsync` copies the schematic,
-/// placement and the meshing-relevant config into one of these under a mutex, and the worker only
-/// ever sees its own copy.
+/// mid-mesh would otherwise race with it and crash. `rebuildMeshAsync` captures the placement and
+/// the meshing-relevant config under a mutex.
+///
+/// The schematic is held by `shared_ptr<const Schematic>` rather than copied: a schematic can be
+/// megabytes, and copying it on the calling thread every rebuild was needless work. Publishing an
+/// immutable schematic once and sharing it keeps the snapshot race-free without the copy — the
+/// pointed-to object is never mutated after publication.
 struct MeshRequest {
-  Schematic schematic;
+  std::shared_ptr<const Schematic> schematic;
   bitematica::world::Placement placement;
   int layerMin{};
   int layerMax{};
@@ -173,8 +178,16 @@ private:
 
   ll::mod::NativeMod *mSelf{};
   Config mConfig;
-  Schematic mSchematic;
+  /// The loaded schematic, published immutably so the worker thread can share it without a copy.
+  /// Empty (null) until a file loads. Never mutated in place: a load replaces the whole pointer.
+  std::shared_ptr<const Schematic> mSchematicPtr;
   bool mHasSchematic{false};
+
+  /// A reference to the loaded schematic, or a static empty one so callers need no null checks.
+  const Schematic &schematic() const {
+    static const Schematic kEmpty;
+    return mSchematicPtr ? *mSchematicPtr : kEmpty;
+  }
   std::vector<std::string> mFiles;
   int mFileIndex{0};
 
@@ -190,7 +203,7 @@ private:
   ControllerNavigator mNavigator;
   std::string mStatus;
   std::string mHint;
-  bool mEnabled{false};
+  std::atomic<bool> mEnabled{false};
 
   // GLES side (render thread).
   bitematica::gles::SchematicRenderer mRenderer;
@@ -251,18 +264,22 @@ bool BiteMaticaMod::load() {
 }
 
 bool BiteMaticaMod::enable() {
-  mEnabled = true;
+  mEnabled.store(true, std::memory_order_release);
   registerMenuModule();
   installInputCallbacks();
   installRenderCallback();
-  mWorldSource.install();
+  // Pass the configured slot. A negative value means "not verified for this build", and the source
+  // stays available()==false so verification reports "world not readable" rather than guessing.
+  mWorldSource.install(mConfig.verifyBlockSourceSlot > 0
+                           ? static_cast<std::size_t>(mConfig.verifyBlockSourceSlot)
+                           : 0);
   refreshStatusLine();
   submitHud();
   return true;
 }
 
 bool BiteMaticaMod::disable() {
-  mEnabled = false;
+  mEnabled.store(false, std::memory_order_release);
   mMeshWorkerStop.store(true, std::memory_order_release);
   if (mMeshWorker.joinable()) mMeshWorker.join();
   pl::render::UnregisterRenderCallbacks(true);
@@ -272,7 +289,7 @@ bool BiteMaticaMod::disable() {
 }
 
 bool BiteMaticaMod::unload() {
-  mEnabled = false;
+  mEnabled.store(false, std::memory_order_release);
   // A joinable std::thread destroyed while still joinable calls std::terminate, so the worker must
   // be stopped and joined here too, not only in disable().
   mMeshWorkerStop.store(true, std::memory_order_release);
@@ -335,12 +352,12 @@ void BiteMaticaMod::registerMenuModule() {
 
 void BiteMaticaMod::installInputCallbacks() {
   pl::input::registerTouchCallback([this](const pl::input::TouchEvent &event) {
-    if (!mEnabled) return false;
+    if (!mEnabled.load(std::memory_order_acquire)) return false;
     if (event.action != 0 /* ACTION_DOWN */) return false;
     return handleTouch(event.x, event.y);
   });
   pl::input::registerKeyCallback([this](const pl::input::KeyEvent &event) {
-    if (!mEnabled) return false;
+    if (!mEnabled.load(std::memory_order_acquire)) return false;
     return handleKey(event.keyCode, event.isKeyDown);
   });
 }
@@ -393,10 +410,10 @@ void BiteMaticaMod::installRenderCallback() {
           std::lock_guard<std::mutex> lock(mRequestMutex);
           request = mRequest;
         }
-        if (request.schematic.empty()) continue;
+        if (!request.schematic || request.schematic->empty()) continue;
 
         const auto built = bitematica::mesh::SectionMesher::build(
-            request.schematic, request.placement, request.layerMin, request.layerMax,
+            *request.schematic, request.placement, request.layerMin, request.layerMax,
             request.maxTriangles);
         {
           std::lock_guard<std::mutex> lock(mPendingMutex);
@@ -410,7 +427,13 @@ void BiteMaticaMod::installRenderCallback() {
   }
 
   pl::render::RegisterRenderCallback([this](const pl::render::RenderContext &context) {
-    if (!mEnabled || !mConfig.enabled) return;
+    // Read the snapshot's enabled flag, not the raw members: those are written by input callbacks
+    // on another thread, and the snapshot is the synchronized copy. `drawWorldSpace` re-reads the
+    // snapshot itself, so this is only a cheap early-out.
+    {
+      std::lock_guard<std::mutex> lock(mRenderMutex);
+      if (!mRenderSnapshot.enabled) return;
+    }
     drawWorldSpace(context);
   });
 }
@@ -436,11 +459,30 @@ void BiteMaticaMod::drawWorldSpace(const pl::render::RenderContext &context) {
   // Upload any mesh the worker finished.
   uploadPendingMesh();
 
-  // Camera: prefer the game's real matrices; fall back to a first-person approximation.
+  // Camera: prefer the game's real matrices, but only if they are actually world-space. The SDK
+  // resolves them by a best-effort probe, so their space is not guaranteed; `looksWorldSpace`
+  // rejects a camera-relative matrix (which would place the ghost at the wrong spot) and the code
+  // then falls back to the first-person approximation.
   bitematica::render::Mat4 viewProjection;
+  bool haveCamera = false;
   if (context.hasViewProjection) {
-    for (int i = 0; i < 16; ++i) viewProjection.m[i] = context.viewProjection.m[i];
-  } else {
+    bitematica::render::Mat4 candidate;
+    for (int i = 0; i < 16; ++i) candidate.m[i] = context.viewProjection.m[i];
+    bitematica::render::Vec3 cameraPosition{mPlayerPosition.x, mPlayerPosition.y + 1.62f,
+                                            mPlayerPosition.z};
+    bitematica::render::Vec3 cameraForward{0.0f, 0.0f, -1.0f};
+    if (context.hasCameraPosition) {
+      cameraPosition = {context.cameraPosition.x, context.cameraPosition.y, context.cameraPosition.z};
+    }
+    if (context.hasCameraForward) {
+      cameraForward = {context.cameraForward.x, context.cameraForward.y, context.cameraForward.z};
+    }
+    if (bitematica::render::looksWorldSpace(candidate, cameraPosition, cameraForward)) {
+      viewProjection = candidate;
+      haveCamera = true;
+    }
+  }
+  if (!haveCamera) {
     float aspect = 16.0f / 9.0f;
     if (context.viewportHeight > 0) {
       aspect = static_cast<float>(context.viewportWidth) / static_cast<float>(context.viewportHeight);
@@ -464,16 +506,11 @@ void BiteMaticaMod::drawWorldSpace(const pl::render::RenderContext &context) {
                                         static_cast<float>(placement.origin.z)};
   const float yaw = static_cast<float>(static_cast<int>(placement.rotation) * 90);
 
-  // Cull in placement-local space. Section boxes are axis-aligned there regardless of the
-  // placement's rotation, so a rotated placement's sections are no longer wrongly culled at the
-  // screen edges, and the distance test compares like-for-like (local centre vs local camera).
-  const bitematica::render::Mat4 localToWorld =
-      bitematica::render::placementLocalToWorld(origin, yaw);
-  const bitematica::render::Mat4 localViewProjection =
-      bitematica::render::Mat4::multiply(viewProjection, localToWorld);
-  const auto frustum = bitematica::render::Frustum::fromViewProjection(localViewProjection);
-  const bitematica::render::Vec3 localCamera =
-      bitematica::render::worldToPlacementLocal(origin, yaw, mPlayerPosition);
+  // Build the mvp and the cull from the same inputs. `mvp` stays the plain world->clip matrix
+  // (the shader applies the placement transform itself); the frustum and camera are in
+  // placement-local space, where section boxes are axis-aligned regardless of rotation.
+  const bitematica::render::PlacementCull cull =
+      bitematica::render::computePlacementCull(viewProjection, origin, yaw, mPlayerPosition);
 
   const bitematica::gles::DrawMode mode =
       snapshot.verifyAgainstWorld
@@ -482,8 +519,8 @@ void BiteMaticaMod::drawWorldSpace(const pl::render::RenderContext &context) {
                  ? bitematica::gles::DrawMode::Outlines
                  : bitematica::gles::DrawMode::Translucent);
 
-  mRenderer.draw(localViewProjection, origin, yaw, mode, snapshot.opacity, localCamera,
-                 snapshot.renderDistance, frustum, mSectionBuffers);
+  mRenderer.draw(cull.mvp, origin, yaw, mode, snapshot.opacity, cull.localCamera,
+                 snapshot.renderDistance, cull.frustum, mSectionBuffers);
 }
 
 void BiteMaticaMod::uploadPendingMesh() {
@@ -529,7 +566,9 @@ void BiteMaticaMod::rebuildMeshAsync() {
   currentLayerRange(layerMin, layerMax);
   {
     std::lock_guard<std::mutex> lock(mRequestMutex);
-    mRequest.schematic = mSchematic;
+    // Share the immutable schematic rather than copying it; only the small placement/config fields
+    // are copied.
+    mRequest.schematic = mSchematicPtr;
     mRequest.placement = mPlacement;
     mRequest.layerMin = layerMin;
     mRequest.layerMax = layerMax;
@@ -541,7 +580,7 @@ void BiteMaticaMod::rebuildMeshAsync() {
 // --- actions -------------------------------------------------------------------------
 
 void BiteMaticaMod::currentLayerRange(int &outMin, int &outMax) const {
-  mConfig.resolvedLayers(mSchematic.sizeY(), outMin, outMax);
+  mConfig.resolvedLayers(schematic().sizeY(), outMin, outMax);
 }
 
 bool BiteMaticaMod::performAction(bitematica::render::ToolbarButton::Action action) {
@@ -622,7 +661,7 @@ bool BiteMaticaMod::performAction(bitematica::render::ToolbarButton::Action acti
       mConfig.layerMode = static_cast<bitematica::mod::LayerMode>(mode);
       // A single layer defaults to the middle of the build so the change is visible.
       if (mConfig.layerMode == bitematica::mod::LayerMode::Single && mHasSchematic) {
-        mConfig.layerSingle = mSchematic.sizeY() / 2;
+        mConfig.layerSingle = schematic().sizeY() / 2;
       }
       mConfig.normalize();
       saveConfig();
@@ -649,6 +688,7 @@ bool BiteMaticaMod::performAction(bitematica::render::ToolbarButton::Action acti
         loadCurrentSchematic();
       } else {
         mHasSchematic = false;
+        mSchematicPtr.reset();
         setStatus("No schematic found");
       }
       return true;
@@ -667,6 +707,7 @@ void BiteMaticaMod::scanLibrary() {
 void BiteMaticaMod::loadCurrentSchematic() {
   if (mFiles.empty() || mFileIndex < 0 || mFileIndex >= static_cast<int>(mFiles.size())) {
     mHasSchematic = false;
+    mSchematicPtr.reset();
     return;
   }
   const std::string path = mFiles[static_cast<size_t>(mFileIndex)];
@@ -674,13 +715,16 @@ void BiteMaticaMod::loadCurrentSchematic() {
       bitematica::format::SchematicFormat::readPath(path);
   if (!result.success) {
     mHasSchematic = false;
+    mSchematicPtr.reset();
     setStatus("Load failed: " + result.error);
     if (mSelf != nullptr) mSelf->getLogger().warn("Failed to load {}: {}", path, result.error);
     return;
   }
-  mSchematic = result.schematic;
+  // Publish the parsed schematic immutably. The worker and the render callback read this pointer;
+  // nothing mutates the pointed-to object afterward.
+  mSchematicPtr = std::make_shared<const Schematic>(std::move(result.schematic));
   mHasSchematic = true;
-  mMaterials = bitematica::core::MaterialList::build(mSchematic);
+  mMaterials = bitematica::core::MaterialList::build(schematic());
   mLiveMaterials.clear();
   mVerification = bitematica::world::VerifyResult{};
   mConfig.lastLoadedFile = path;
@@ -720,9 +764,9 @@ void BiteMaticaMod::runVerification() {
   int layerMin = 0;
   int layerMax = 0;
   currentLayerRange(layerMin, layerMax);
-  mVerification = bitematica::world::Verifier::verify(mSchematic, mPlacement, mWorldSource,
+  mVerification = bitematica::world::Verifier::verify(schematic(), mPlacement, mWorldSource,
                                                       layerMin, layerMax, mConfig.verifyExtras);
-  mLiveMaterials = bitematica::core::LiveMaterials::build(mSchematic, mVerification);
+  mLiveMaterials = bitematica::core::LiveMaterials::build(schematic(), mVerification);
   char buffer[160];
   std::snprintf(buffer, sizeof(buffer), "Verified: %lld correct, %lld missing, %lld wrong, %lld extra",
                 mVerification.correct, mVerification.missing, mVerification.wrong,
@@ -738,14 +782,14 @@ void BiteMaticaMod::exportStructure() {
   const std::filesystem::path exports = mSelf->getDataDir() / "exports";
   std::error_code ec;
   std::filesystem::create_directories(exports, ec);
-  std::string base = std::filesystem::path(mSchematic.name).filename().string();
+  std::string base = std::filesystem::path(schematic().name).filename().string();
   if (base.empty()) base = "bitematica_export";
   const std::filesystem::path outPath = exports / (base + ".mcstructure");
   std::string error;
-  if (bitematica::format::StructureWriter::write(mSchematic, outPath.string(), error)) {
+  if (bitematica::format::StructureWriter::write(schematic(), outPath.string(), error)) {
     // The player loads it with /structure load; that is the reliable cheat-route placement.
     setStatus("Exported. Run: /" + bitematica::world::CheatPlacement::loadCommandForPlacement(
-                                    bitematica::world::CheatPlacement::structureNameFor(mSchematic),
+                                    bitematica::world::CheatPlacement::structureNameFor(schematic()),
                                     mPlacement));
   } else {
     setStatus("Export failed: " + error);
@@ -760,7 +804,7 @@ void BiteMaticaMod::saveLitematic() {
   std::error_code ec;
   std::filesystem::create_directories(exports, ec);
 
-  std::string base = std::filesystem::path(mSchematic.name).filename().string();
+  std::string base = std::filesystem::path(schematic().name).filename().string();
   if (base.empty()) base = "bitematica_export";
   const std::filesystem::path outPath = exports / (base + ".litematic");
 
@@ -769,7 +813,7 @@ void BiteMaticaMod::saveLitematic() {
     // Capture the placement's world box into a fresh schematic, then write that.
     BlockPos min;
     BlockPos max;
-    mPlacement.worldBounds(mSchematic, min, max);
+    mPlacement.worldBounds(schematic(), min, max);
     bitematica::world::Selection selection;
     selection.setCornerA(min);
     selection.setCornerB(max);
@@ -791,7 +835,7 @@ void BiteMaticaMod::saveLitematic() {
     setStatus("Nothing loaded to save");
     return;
   }
-  if (bitematica::format::LitematicWriter::write(mSchematic, outPath.string(), mSchematic.name,
+  if (bitematica::format::LitematicWriter::write(schematic(), outPath.string(), schematic().name,
                                                  "BiteMatica", error)) {
     setStatus("Saved to " + outPath.string());
   } else {
@@ -834,8 +878,8 @@ void BiteMaticaMod::refreshStatusLine() {
                                                                                      : "range");
   char buffer[200];
   std::snprintf(buffer, sizeof(buffer), "%s  %dx%dx%d  %s  %s  rot %d  @%d,%d,%d",
-                mSchematic.name.c_str(), mSchematic.sizeX(), mSchematic.sizeY(),
-                mSchematic.sizeZ(), mode, layer, static_cast<int>(mPlacement.rotation) * 90,
+                schematic().name.c_str(), schematic().sizeX(), schematic().sizeY(),
+                schematic().sizeZ(), mode, layer, static_cast<int>(mPlacement.rotation) * 90,
                 mPlacement.origin.x, mPlacement.origin.y, mPlacement.origin.z);
   setStatus(buffer);
 }
@@ -865,7 +909,7 @@ void BiteMaticaMod::submitHud() {
   // The 2D overlay only draws the toolbar and material panel; the schematic itself is world-space
   // geometry now, so `hasSchematic` is false here to suppress the old software mesh.
   const std::vector<UiCommand> commands = HudOverlay::buildCommands(
-      mSchematic, mConfig, mCamera, mButtons, displayMaterials, infoLine, false);
+      schematic(), mConfig, mCamera, mButtons, displayMaterials, infoLine, false);
 
   std::vector<pl::modmenu::DrawCommand> sdkCommands;
   sdkCommands.reserve(commands.size());

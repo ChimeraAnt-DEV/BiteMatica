@@ -19,6 +19,7 @@
 #include "format/SchematicFormat.hpp"
 #include "mesh/SectionMesher.hpp"
 #include "render/MathTypes.hpp"
+#include "render/PlacementCull.hpp"
 #include "translate/BlockTranslation.hpp"
 #include "world/CheatPlacement.hpp"
 #include "world/Placement.hpp"
@@ -311,6 +312,76 @@ void testRotatedPlacementFrustumCull() {
   }
 }
 
+void testPlacementCullMvpExcludesPlacementTransform() {
+  std::printf("testPlacementCullMvpExcludesPlacementTransform\n");
+  // The regression this guards: the vertex shader applies the placement's yaw and origin itself, so
+  // `mvp` must be the *plain* world->clip matrix. Feeding it `viewProjection * localToWorld`
+  // transforms every vertex twice and puts the ghost at roughly double the offset with doubled
+  // rotation. This pins that `mvp` is untouched while the frustum/camera are in local space.
+  const bitematica::render::Vec3 origin{100.0f, 64.0f, -50.0f};
+  const bitematica::render::Vec3 camera{0.0f, 0.0f, 20.0f};
+  const auto viewProjection = bitematica::render::Mat4::multiply(
+      bitematica::render::perspective(70.0f, 1.5f, 0.1f, 1000.0f),
+      bitematica::render::lookAt(camera, {0, 0, -1}, {0, 1, 0}));
+
+  for (int rotation = 0; rotation < 4; ++rotation) {
+    const float yaw = static_cast<float>(rotation * 90);
+    const auto cull =
+        bitematica::render::computePlacementCull(viewProjection, origin, yaw, camera);
+
+    // mvp must equal the input viewProjection element-for-element.
+    bool mvpEqual = true;
+    for (int i = 0; i < 16; ++i) {
+      if (std::fabs(cull.mvp.m[i] - viewProjection.m[i]) > 1e-6f) mvpEqual = false;
+    }
+    check(mvpEqual, "mvp is the plain world->clip matrix at yaw " + std::to_string(rotation * 90));
+
+    // And it must NOT equal viewProjection * localToWorld (the double-transform mistake).
+    const auto localToWorld = bitematica::render::placementLocalToWorld(origin, yaw);
+    const auto doubled = bitematica::render::Mat4::multiply(viewProjection, localToWorld);
+    bool differsFromDoubled = false;
+    for (int i = 0; i < 16; ++i) {
+      if (std::fabs(cull.mvp.m[i] - doubled.m[i]) > 1e-4f) differsFromDoubled = true;
+    }
+    check(differsFromDoubled,
+          "mvp does not include the placement transform at yaw " + std::to_string(rotation * 90));
+
+    // The camera must be in local space. Converting the local camera back to world must return the
+    // original world camera, which would fail if `computePlacementCull` had left it in world space.
+    const auto worldBack = localToWorld.transformPoint(cull.localCamera);
+    check(std::fabs(worldBack.x - camera.x) < 1e-3f &&
+              std::fabs(worldBack.y - camera.y) < 1e-3f &&
+              std::fabs(worldBack.z - camera.z) < 1e-3f,
+          "localCamera round-trips back to the world camera at yaw " +
+              std::to_string(rotation * 90));
+  }
+}
+
+void testLooksWorldSpace() {
+  std::printf("testLooksWorldSpace\n");
+  // A genuine world->clip matrix built from a camera at a non-origin world position must be
+  // accepted.
+  const bitematica::render::Vec3 eye{100.0f, 70.0f, -200.0f};
+  const bitematica::render::Vec3 forward{0.0f, 0.0f, -1.0f};
+  const auto worldVp = bitematica::render::Mat4::multiply(
+      bitematica::render::perspective(70.0f, 1.5f, 0.1f, 1000.0f),
+      bitematica::render::lookAt(eye, forward, {0, 1, 0}));
+  check(bitematica::render::looksWorldSpace(worldVp, eye, forward),
+        "a world-space view-projection is accepted");
+
+  // The same view matrix WITHOUT the translation is camera-relative: it expects the camera at the
+  // origin, so the world-space eye projects off-centre and the check must reject it.
+  const auto cameraRelativeVp = bitematica::render::Mat4::multiply(
+      bitematica::render::perspective(70.0f, 1.5f, 0.1f, 1000.0f),
+      bitematica::render::lookAt({0, 0, 0}, forward, {0, 1, 0}));
+  check(!bitematica::render::looksWorldSpace(cameraRelativeVp, eye, forward),
+        "a camera-relative view-projection is rejected");
+
+  // A degenerate forward vector is refused rather than divided by.
+  check(!bitematica::render::looksWorldSpace(worldVp, eye, {0, 0, 0}),
+        "a zero forward vector is rejected");
+}
+
 // --- verification ---------------------------------------------------------------------
 
 void testVerification() {
@@ -538,6 +609,8 @@ int main() {
   testFrustumCull();
   testPlacementLocalTransformMatchesShader();
   testRotatedPlacementFrustumCull();
+  testPlacementCullMvpExcludesPlacementTransform();
+  testLooksWorldSpace();
   testVerification();
   testVerificationUnavailable();
   testVerificationExtras();
