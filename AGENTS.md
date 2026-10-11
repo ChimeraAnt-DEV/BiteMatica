@@ -17,9 +17,9 @@ src/translate/  BlockTranslation (Java -> Bedrock block states)
 src/render/     MathTypes (matrices/frustum), HudOverlay (2D toolbar), ViewCamera (legacy)
 src/gles/       Gles (runtime-resolved entry points), SchematicRenderer (GL state save/restore)
 src/mod/        Config, JsonConfig, SchematicLibrary, ControllerNavigator,
-                GameWorldSource, BiteMaticaMod (preloader glue)
+                GameWorldSource, SdkCompat (weak render API), BiteMaticaMod (glue)
 test/           host test suites + fixture generator
-tools/          pack_antegg.py, generate_demo.py, generate_icon.py
+tools/          pack_antegg.py, generate_demo.py, generate_icon.py, verify_antegg.py
 packaging/      egg.json, manifest.json, default config + schema
 assets/         demo schematic, generated icon
 ```
@@ -118,6 +118,16 @@ src/render/HudOverlay.cpp src/mod/ControllerNavigator.cpp src/mod/JsonConfig.cpp
   scissor and colour mask; `restoreState` runs even when no section is drawn. The shader binds no
   texture, so the 2D texture binding is deliberately not touched — only the active unit is restored.
 - **Uniform locations are resolved once at init**, not per frame.
+- **The render API must stay weak-linked (`src/mod/SdkCompat.hpp`).** A native mod whose `.so` has
+  an undefined, *non-weak* symbol the running preloader does not export fails to load: `dlopen`
+  cannot resolve it and the launcher shows "Built for a different game build (missing symbol)".
+  GlowberryClient pins a preloader commit that predates `pl/Render.hpp`, so `pl::render::*` is
+  declared weak in `SdkCompat.hpp` and every call goes through `bitematica::mod::SdkRender`, which
+  checks the pointer. Without the render API the mod falls back to the software overlay
+  (`mWorldSpaceAvailable == false`). Two guards: `test/link_check.sh` (the linked `.so` has no
+  strong `pl::render::` reference) and `tools/verify_antegg.py` (the packaged `.so`). Both run in CI.
+  Do not include `pl/Render.hpp` without the compat header, and do not add a direct
+  `pl::render::` call that skips `SdkRender`.
 - **`uMvp` must be the plain world->clip matrix.** The vertex shader applies the placement's yaw
   and origin itself, so `draw()` takes the world `mvp` and the placement-local frustum/camera
   separately (`render::computePlacementCull`). Passing `viewProjection * localToWorld` as `uMvp`

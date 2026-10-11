@@ -22,6 +22,11 @@
 #include <pl/ModMenu.hpp>
 #include <pl/Render.hpp>
 
+// Weak-links the render API so this same .AntEgg also loads on a preloader that predates it
+// (GlowberryClient currently pins such a commit). Without this the mod's undefined pl::render::*
+// symbols make dlopen fail and the launcher reports "missing symbol".
+#include "mod/SdkCompat.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -204,6 +209,9 @@ private:
   std::string mStatus;
   std::string mHint;
   std::atomic<bool> mEnabled{false};
+  /// True when the running preloader exports the per-frame render API. When false the mod draws
+  /// through the software overlay instead of world-space GL geometry.
+  bool mWorldSpaceAvailable{false};
 
   // GLES side (render thread).
   bitematica::gles::SchematicRenderer mRenderer;
@@ -267,7 +275,16 @@ bool BiteMaticaMod::enable() {
   mEnabled.store(true, std::memory_order_release);
   registerMenuModule();
   installInputCallbacks();
-  installRenderCallback();
+  // The per-frame render callback only exists on a preloader that has the render API. On an older
+  // one the mod still loads and runs, using the software overlay instead.
+  mWorldSpaceAvailable = bitematica::mod::SdkRender::available();
+  if (mWorldSpaceAvailable) {
+    installRenderCallback();
+  } else if (mSelf != nullptr) {
+    // No render API: the GL mesh worker would build geometry nothing draws, so it is not started.
+    mSelf->getLogger().warn(
+        "BiteMatica: this preloader has no per-frame render API; using the software overlay");
+  }
   // Pass the configured slot. A negative value means "not verified for this build", and the source
   // stays available()==false so verification reports "world not readable" rather than guessing.
   mWorldSource.install(mConfig.verifyBlockSourceSlot > 0
@@ -282,7 +299,7 @@ bool BiteMaticaMod::disable() {
   mEnabled.store(false, std::memory_order_release);
   mMeshWorkerStop.store(true, std::memory_order_release);
   if (mMeshWorker.joinable()) mMeshWorker.join();
-  pl::render::UnregisterRenderCallbacks(true);
+  bitematica::mod::SdkRender::unregisterCallbacks(true);
   pl::modmenu::unregisterModule(kModuleId);
   if (mSelf != nullptr) mSelf->getLogger().info("BiteMatica disabled");
   return true;
@@ -426,7 +443,7 @@ void BiteMaticaMod::installRenderCallback() {
     });
   }
 
-  pl::render::RegisterRenderCallback([this](const pl::render::RenderContext &context) {
+  bitematica::mod::SdkRender::registerCallback([this](const pl::render::RenderContext &context) {
     // Read the snapshot's enabled flag, not the raw members: those are written by input callbacks
     // on another thread, and the snapshot is the synchronized copy. `drawWorldSpace` re-reads the
     // snapshot itself, so this is only a cheap early-out.
@@ -488,7 +505,8 @@ void BiteMaticaMod::drawWorldSpace(const pl::render::RenderContext &context) {
       aspect = static_cast<float>(context.viewportWidth) / static_cast<float>(context.viewportHeight);
     }
     pl::render::Mat4 sdkProjection;
-    if (!pl::render::ComputeViewProjection(70.0f, aspect, 0.05f, 1024.0f, sdkProjection)) {
+    if (!bitematica::mod::SdkRender::computeViewProjection(70.0f, aspect, 0.05f, 1024.0f,
+                                                           sdkProjection)) {
       return; // no camera at all this frame: draw nothing rather than guess
     }
     for (int i = 0; i < 16; ++i) viewProjection.m[i] = sdkProjection.m[i];
@@ -496,7 +514,7 @@ void BiteMaticaMod::drawWorldSpace(const pl::render::RenderContext &context) {
 
   // Track the player position for "move to player" and the distance cull.
   float position[3] = {0.0f, 0.0f, 0.0f};
-  if (pl::render::ReadLocalPlayerPosition(position)) {
+  if (bitematica::mod::SdkRender::readLocalPlayerPosition(position)) {
     mPlayerPosition = {position[0], position[1], position[2]};
   }
 
@@ -559,6 +577,9 @@ void BiteMaticaMod::refreshRenderSnapshot() {
 }
 
 void BiteMaticaMod::rebuildMeshAsync() {
+  // In software-overlay mode there is no GL draw, so the section mesh is not needed; the overlay
+  // builds its own projection on demand. Skipping the worker avoids pointless background work.
+  if (!mWorldSpaceAvailable) return;
   // Snapshot the meshing inputs under the lock, then flag the worker. The worker reads only the
   // snapshot, so a load/rotate/edit on another thread cannot race it.
   int layerMin = 0;
@@ -740,7 +761,7 @@ void BiteMaticaMod::loadCurrentSchematic() {
 
 void BiteMaticaMod::moveToPlayer() {
   float position[3] = {0.0f, 0.0f, 0.0f};
-  if (pl::render::ReadLocalPlayerPosition(position)) {
+  if (bitematica::mod::SdkRender::readLocalPlayerPosition(position)) {
     mPlayerPosition = {position[0], position[1], position[2]};
   }
   // Place the schematic a few blocks in front of the player so it does not overlap them.
@@ -876,11 +897,12 @@ void BiteMaticaMod::refreshStatusLine() {
                           ? "all"
                           : (mConfig.layerMode == bitematica::mod::LayerMode::Single ? "layer"
                                                                                      : "range");
-  char buffer[200];
-  std::snprintf(buffer, sizeof(buffer), "%s  %dx%dx%d  %s  %s  rot %d  @%d,%d,%d",
+  char buffer[220];
+  std::snprintf(buffer, sizeof(buffer), "%s  %dx%dx%d  %s  %s  rot %d  @%d,%d,%d  %s",
                 schematic().name.c_str(), schematic().sizeX(), schematic().sizeY(),
                 schematic().sizeZ(), mode, layer, static_cast<int>(mPlacement.rotation) * 90,
-                mPlacement.origin.x, mPlacement.origin.y, mPlacement.origin.z);
+                mPlacement.origin.x, mPlacement.origin.y, mPlacement.origin.z,
+                mWorldSpaceAvailable ? "world-space" : "software overlay");
   setStatus(buffer);
 }
 
@@ -905,11 +927,18 @@ void BiteMaticaMod::submitHud() {
     }
   }
 
-  const std::string infoLine = mHint.empty() ? mStatus : (mStatus + "   " + mHint);
-  // The 2D overlay only draws the toolbar and material panel; the schematic itself is world-space
-  // geometry now, so `hasSchematic` is false here to suppress the old software mesh.
+  std::string infoLine = mHint.empty() ? mStatus : (mStatus + "   " + mHint);
+  // When the render API is present the schematic is world-space GL geometry and the HUD only draws
+  // the toolbar and panel (`hasSchematic` false). On an older preloader there is no render callback,
+  // so the mod falls back to the software overlay: the schematic is projected and drawn as HUD
+  // commands, exactly as it was before world-space rendering.
+  const bool softwareOverlay = !mWorldSpaceAvailable;
+  if (softwareOverlay && mHasSchematic && mConfig.renderMode != bitematica::mod::RenderMode::Hidden) {
+    infoLine += "   [software overlay: update the launcher for world-space]";
+  }
   const std::vector<UiCommand> commands = HudOverlay::buildCommands(
-      schematic(), mConfig, mCamera, mButtons, displayMaterials, infoLine, false);
+      schematic(), mConfig, mCamera, mButtons, displayMaterials, infoLine,
+      softwareOverlay && mHasSchematic);
 
   std::vector<pl::modmenu::DrawCommand> sdkCommands;
   sdkCommands.reserve(commands.size());

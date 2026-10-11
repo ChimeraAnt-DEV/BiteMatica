@@ -51,6 +51,17 @@ It is a *bite-sized Litematica for Bedrock* — rebuilt from the ground up for a
 
 Detection is by **content first**, not the file extension: BiteMatica decompresses the file, reads its NBT, and inspects the root compound to decide what it is holding. A `.litematic` renamed to `.schem` still opens. A file that is not a schematic fails with a specific reason ("schem is missing a Palette compound"), never with a vague "unsupported file".
 
+### Compatibility with the launcher's preloader
+
+The world-space renderer needs the preloader's per-frame render API. A mod whose `.so` has an *undefined, non-weak* symbol the running preloader does not export **fails to load entirely** — the launcher reports "Built for a different game build (missing symbol)" and nothing runs.
+
+BiteMatica declares that API **weak**, so:
+
+- On a preloader **with** the render API: full world-space rendering.
+- On a preloader **without** it (the commit GlowberryClient currently pins): the mod **still loads and runs**, drawing the schematic through the software overlay instead. The status line says `software overlay` so the mode is never a mystery.
+
+That means one `.AntEgg` works across launcher builds, and nothing is silently broken.
+
 ### World-space rendering
 - The schematic is drawn as **real 3D geometry in the world**, not a screen-space projection — so it moves with the world as you walk, and it sits at a real position you can build toward.
 - **Depth-tested**: ghost blocks are hidden behind real terrain. A wall you have already built occludes the ghost of the wall behind it, which is the whole point of an overlay you can build against.
