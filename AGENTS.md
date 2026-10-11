@@ -59,7 +59,7 @@ python3 test/make_fixtures.py test/fixtures
 cmake -S . -B build/host -DCMAKE_BUILD_TYPE=Release
 cmake --build build/host --target bitematica_tests bitematica_world_tests
 ./build/host/bitematica_tests        # 85 checks: formats, projector, toolbar, controller, config
-./build/host/bitematica_world_tests  # 64 checks: placement, mesher, verification, translation
+./build/host/bitematica_world_tests  # 95 checks: placement, mesher, culling, verification, translation
 ```
 
 The suites read **generated real schematic files** through the production readers. Do not
@@ -118,6 +118,18 @@ src/render/HudOverlay.cpp src/mod/ControllerNavigator.cpp src/mod/JsonConfig.cpp
   scissor and colour mask; `restoreState` runs even when no section is drawn. The shader binds no
   texture, so the 2D texture binding is deliberately not touched — only the active unit is restored.
 - **Uniform locations are resolved once at init**, not per frame.
+- **`uMvp` must be the plain world->clip matrix.** The vertex shader applies the placement's yaw
+  and origin itself, so `draw()` takes the world `mvp` and the placement-local frustum/camera
+  separately (`render::computePlacementCull`). Passing `viewProjection * localToWorld` as `uMvp`
+  transforms every vertex twice — `testPlacementCullMvpExcludesPlacementTransform` fails if that
+  creeps back in.
+- **The SDK's camera matrix is only trusted after `looksWorldSpace`.** The SDK resolves it by a
+  probe, so its coordinate space is not guaranteed; `looksWorldSpace` rejects a camera-relative
+  matrix and the caller then uses the first-person fallback.
+- **Verification is off until a build's `BlockSource::getBlock` slot is set** (`verifyBlockSourceSlot`,
+  default `-1`). There is no runtime discovery, and a wrong slot faults the game thread. To enable
+  it on a new build: confirm the slot the way the SDK's own hooks do, set it in the config, and
+  watch the `BiteMatica: world source ...` log line.
 - **The package must contain its `egg.json` entry point.** `pack_antegg.py` refuses to run
   when `egg.json`'s `entry_point` and `--entry` disagree; the loader would reject it later.
 

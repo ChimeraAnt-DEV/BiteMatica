@@ -56,21 +56,23 @@ public:
 
   /// Draws the uploaded sections for this frame.
   ///
-  /// Culling happens entirely in the placement's local space, so both the frustum and the camera
-  /// position are passed already transformed into it (`viewProjection * localToWorld` for the
-  /// frustum, `worldToPlacementLocal` for the camera). That is what makes the cull correct for a
-  /// rotated placement: section boxes stay axis-aligned in local space, and a rotated placement's
-  /// sections are no longer wrongly culled at the screen edges.
+  /// The two coordinate spaces are deliberately separate and must not be swapped:
   ///
-  /// @param localViewProjection world->clip pre-multiplied by the placement's local->world matrix
+  ///  * `mvp` is the **world** -> clip matrix uploaded as `uMvp`. The vertex shader applies the
+  ///    placement's rotation and translation itself, so `mvp` must NOT include them — doing so
+  ///    transforms every vertex twice.
+  ///  * `localFrustum` and `localCameraPosition` are in **placement-local** space and are used only
+  ///    for culling, where section boxes are axis-aligned regardless of the placement's rotation.
+  ///
+  /// @param mvp the plain world->clip matrix (no placement transform)
   /// @param placementOrigin world position of the placement's minimum corner
   /// @param placementRotationDegrees the placement's yaw (0/90/180/270) applied about the origin
   /// @param mode translucent / outlines / mismatch
   /// @param alpha 0..1 overall alpha
   /// @param localCameraPosition the camera in placement-local space, for distance culling
   /// @param maxDistance distance cull radius in blocks (<= 0 disables it)
-  /// @param localFrustum frustum extracted from `localViewProjection`
-  void draw(const render::Mat4 &localViewProjection, const render::Vec3 &placementOrigin,
+  /// @param localFrustum frustum in placement-local space, for frustum culling
+  void draw(const render::Mat4 &mvp, const render::Vec3 &placementOrigin,
             float placementRotationDegrees, DrawMode mode, float alpha,
             const render::Vec3 &localCameraPosition, float maxDistance,
             const render::Frustum &localFrustum, const std::vector<SectionBuffer> &sections);

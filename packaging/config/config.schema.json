@@ -85,6 +85,12 @@
       "description": "Also flag world blocks sitting where the schematic wants air.",
       "type": "boolean"
     },
+    "verifyBlockSourceSlot": {
+      "title": "BlockSource::getBlock Slot",
+      "description": "Primary-vtable slot of the world block getter for your game build, or -1 to leave verification off. Only set this once you have confirmed the slot for your build: a wrong slot can crash the game.",
+      "type": "integer",
+      "minimum": -1
+    },
     "toolbarX": { "title": "Toolbar X", "type": "integer", "minimum": 0 },
     "toolbarY": { "title": "Toolbar Y", "type": "integer", "minimum": 0 },
     "materialX": { "title": "Material Panel X", "type": "integer", "minimum": 0 },

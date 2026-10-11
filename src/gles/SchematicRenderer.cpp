@@ -312,8 +312,7 @@ void SchematicRenderer::shutdown() {
   mReady = false;
 }
 
-void SchematicRenderer::draw(const render::Mat4 &localViewProjection,
-                             const render::Vec3 &placementOrigin,
+void SchematicRenderer::draw(const render::Mat4 &mvp, const render::Vec3 &placementOrigin,
                              float placementRotationDegrees, DrawMode mode, float alpha,
                              const render::Vec3 &localCameraPosition, float maxDistance,
                              const render::Frustum &localFrustum,
@@ -333,6 +332,9 @@ void SchematicRenderer::draw(const render::Mat4 &localViewProjection,
   auto cullFace = reinterpret_cast<glCullFace_t>(g.CullFace);
   auto frontFace = reinterpret_cast<glFrontFace_t>(g.FrontFace);
   auto blendFunc = reinterpret_cast<glBlendFuncSeparate_t>(g.BlendFuncSeparate);
+  auto blendEquation = reinterpret_cast<void (*)(GLenum, GLenum)>(g.BlendEquationSeparate);
+  auto colorMask = reinterpret_cast<void (*)(GLboolean, GLboolean, GLboolean, GLboolean)>(
+      g.ColorMask);
   auto useProgram = reinterpret_cast<glUseProgram_t>(g.UseProgram);
   auto uniformMatrix = reinterpret_cast<glUniformMatrix4fv_t>(g.UniformMatrix4fv);
   auto uniform1f = reinterpret_cast<glUniform1f_t>(g.Uniform1f);
@@ -349,6 +351,14 @@ void SchematicRenderer::draw(const render::Mat4 &localViewProjection,
   enable(GL_CULL_FACE);
   cullFace(kBack);
   frontFace(kCcw);
+  // The game may leave stencil or scissor enabled, which would clip the ghost or fail its stencil
+  // test and make it invisible, and a game-set colour mask could hide its channels. Saving these is
+  // not enough — they have to be actively turned off / opened for the draw, then restored.
+  disable(GL_STENCIL_TEST);
+  disable(GL_SCISSOR_TEST);
+  if (colorMask) colorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  // A non-default blend equation would make a translucent draw come out wrong; force the default.
+  if (blendEquation) blendEquation(GL_FUNC_ADD, GL_FUNC_ADD);
   if (mode == DrawMode::Translucent || mode == DrawMode::Mismatch) {
     enable(GL_BLEND);
     if (blendFunc) {
@@ -361,7 +371,8 @@ void SchematicRenderer::draw(const render::Mat4 &localViewProjection,
   // No textures are bound by this program, but a stray binding would be sampled by the game's next
   // draw, so it is restored by restoreState regardless.
 
-  uniformMatrix(mUniformMvp, 1, GL_FALSE, localViewProjection.m);
+  // `mvp` is the plain world->clip matrix: the shader applies the placement transform itself.
+  uniformMatrix(mUniformMvp, 1, GL_FALSE, mvp.m);
   uniform1f(mUniformAlpha, alpha);
 
   const float yawRadians = placementRotationDegrees * 3.14159265358979f / 180.0f;

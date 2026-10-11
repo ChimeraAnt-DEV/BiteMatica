@@ -70,7 +70,8 @@ Show **all layers**, a **single layer**, or a **range** — the standard way to 
 The feature that makes a schematic tool actually useful: **compare the schematic to the live world** and colour every block by its state.
 - **Correct** (green), **Missing** (red, needs placing), **Wrong** (amber, wrong block), **Extra** (blue, should be removed).
 - The comparison is strict about block type but tolerant about states, because Bedrock's state names for the same block differ from Java's.
-- It is **fail-closed**: the mod resolves the game's block getter by RTTI vtable name (the same approach the SDK's own hooks use), and if the target or its ABI is unverified on your build, verification reports "the world is not readable" rather than inventing block states and colouring everything wrong.
+- It is **fail-closed**: the mod resolves the game's block getter by RTTI vtable name (the same approach the SDK's own hooks use), and if the slot is not configured for your build, verification reports "the world is not readable" rather than inventing block states and colouring everything wrong.
+- **Per-build slot required.** There is no reliable way to discover the getter's vtable slot at runtime, and a wrong slot would fault the game thread, so it ships **off** (`verifyBlockSourceSlot: -1`). Once you have confirmed the slot for your game build — the same exercise the SDK's own hooks go through to add a new version — set it in the config and verification turns on. `AGENTS.md` records the procedure.
 
 ### World-anchored placements
 The schematic has a **world origin**, not a screen position. You can **move it to the player**, **rotate it in 90° steps**, **mirror it**, and **offset it vertically** — the toolbar has a button for each.
@@ -193,7 +194,7 @@ cmake --build build/host --target bitematica_tests bitematica_world_tests
 ./build/host/bitematica_world_tests  # placement transforms, mesher, verification, translation
 ```
 
-**165 checks across the two suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
+**180 checks across the two suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
 
 The world suite covers the parts most likely to be subtly wrong and hardest to debug on a device: the placement transform (every rotation × mirror round-trips `toWorld`/`toLocal`), the mesher (a solid 3×3×3 collapses to a handful of merged quads, and interior faces are culled), placement-local frustum culling (the local→world transform is pinned against the shader's own rotation signs), verification (missing/wrong/extra counted against a fake world), the Java→Bedrock direction inversion, and the `.litematic` write→read round trip.
 

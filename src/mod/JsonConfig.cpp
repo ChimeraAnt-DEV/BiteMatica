@@ -128,6 +128,7 @@ private:
     else if (key == "layerSingle") config.layerSingle = value;
     else if (key == "layerMin") config.layerMin = value;
     else if (key == "layerMax") config.layerMax = value;
+    else if (key == "verifyBlockSourceSlot") config.verifyBlockSourceSlot = value;
     else if (key == "toolbarX") config.toolbarX = value;
     else if (key == "toolbarY") config.toolbarY = value;
     else if (key == "materialX") config.materialX = value;
@@ -195,6 +196,7 @@ std::string JsonConfig::serialize(const Config &config) {
   out += "  \"layerMax\": " + std::to_string(config.layerMax) + ",\n";
   out += "  \"verifyAgainstWorld\": " + boolean(config.verifyAgainstWorld) + ",\n";
   out += "  \"verifyExtras\": " + boolean(config.verifyExtras) + ",\n";
+  out += "  \"verifyBlockSourceSlot\": " + std::to_string(config.verifyBlockSourceSlot) + ",\n";
   out += "  \"toolbarX\": " + std::to_string(config.toolbarX) + ",\n";
   out += "  \"toolbarY\": " + std::to_string(config.toolbarY) + ",\n";
   out += "  \"materialX\": " + std::to_string(config.materialX) + ",\n";
