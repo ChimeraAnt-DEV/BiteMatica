@@ -24,7 +24,12 @@ std::vector<LiveMaterialRow> LiveMaterials::build(const Schematic &schematic,
         const world::BlockStatus status = verification.statuses[i];
         if (status == world::BlockStatus::Correct) {
           ++row.placed;
-        } else if (status == world::BlockStatus::Missing || status == world::BlockStatus::Wrong) {
+        } else if (status == world::BlockStatus::Missing ||
+                   status == world::BlockStatus::WrongBlock ||
+                   status == world::BlockStatus::WrongState) {
+          // A wrong block or state still has to be broken and replaced, so it counts as outstanding.
+          // `Unknown` (an unreadable chunk) is deliberately neither placed nor missing — it is not
+          // the player's fault and must not inflate the shopping list.
           ++row.missing;
         }
       }

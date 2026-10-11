@@ -5,6 +5,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "core/BlockShape.hpp"
+
 namespace bitematica::mesh {
 namespace {
 
@@ -47,7 +49,9 @@ int axisSize(const Schematic &s, int axis) {
 bool isSolid(const Schematic &s, int x, int y, int z) {
   const uint32_t state = s.blockAt(x, y, z);
   if (state == 0 || state >= s.palette.size()) return false;
-  return !s.palette.at(state).isAir();
+  // Air, structure void, light blocks and barriers are not solid for meshing or culling: a block
+  // next to one of them still shows that face, and they themselves are never drawn (C4).
+  return !core::BlockShape::neverRenders(s.palette.at(state));
 }
 
 uint32_t shade(uint32_t argb, float factor) {
@@ -97,6 +101,59 @@ void emitQuad(SectionMesh &mesh, const FaceDir &face, float planeW, int aStart, 
   mesh.triangles.push_back({base, base + 2, base + 3});
 }
 
+/// Emits the six faces of one axis-aligned box, wound outward, in section-relative coordinates.
+///
+/// Used for non-cube block shapes (C3). A shape's boxes are independent of their neighbours, so the
+/// exposed-face cull does not apply — the boxes are small and the extra triangles are bounded by the
+/// shape table. Each face gets the directional shading the greedy path uses.
+void emitBox(SectionMesh &mesh, const core::ShapeBox &box, uint32_t color, float originX,
+             float originY, float originZ) {
+  // (axis, positive) for the six faces, matching the shading tags in `kFaces`.
+  struct FaceDef {
+    int n;
+    bool positive;
+    uint8_t faceTag;
+    float shade;
+  };
+  const FaceDef faces[6] = {
+      {1, true, 0, 1.00f}, {1, false, 2, 0.45f}, {0, true, 1, 0.72f},
+      {0, false, 1, 0.72f}, {2, true, 1, 0.86f}, {2, false, 1, 0.86f},
+  };
+  const float mn[3] = {box.minX, box.minY, box.minZ};
+  const float mx[3] = {box.maxX, box.maxY, box.maxZ};
+
+  for (const FaceDef &f : faces) {
+    const float plane = f.positive ? mx[f.n] : mn[f.n];
+    // The two in-plane axes, in the same fixed order as `kFaces` (a, b).
+    const int a = f.n == 0 ? 1 : 0;
+    const int b = f.n == 2 ? 1 : 2;
+    const float a0 = mn[a];
+    const float a1 = mx[a];
+    const float b0 = mn[b];
+    const float b1 = mx[b];
+    // Corners in (a,b): (a0,b0), (a0,b1), (a1,b1), (a1,b0); reverse winding for a negative face.
+    const float corners[4][2] = {{a0, b0}, {a0, b1}, {a1, b1}, {a1, b0}};
+    const int order[4] = {0, f.positive ? 1 : 3, 2, f.positive ? 3 : 1};
+    const uint32_t shaded = shade(color, f.shade);
+    const uint32_t base = static_cast<uint32_t>(mesh.vertices.size());
+    for (int i = 0; i < 4; ++i) {
+      float xyz[3] = {0.0f, 0.0f, 0.0f};
+      xyz[a] = corners[order[i]][0];
+      xyz[b] = corners[order[i]][1];
+      xyz[f.n] = plane;
+      MeshVertex vertex;
+      vertex.x = xyz[0] - originX;
+      vertex.y = xyz[1] - originY;
+      vertex.z = xyz[2] - originZ;
+      vertex.color = shaded;
+      vertex.face = f.faceTag;
+      mesh.vertices.push_back(vertex);
+    }
+    mesh.triangles.push_back({base, base + 1, base + 2});
+    mesh.triangles.push_back({base, base + 2, base + 3});
+  }
+}
+
 } // namespace
 
 SectionMesh SectionMesher::buildSection(const Schematic &schematic,
@@ -115,6 +172,37 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
   const int sizeY = schematic.sizeY();
   const int sizeZ = schematic.sizeZ();
   if (sizeX <= 0 || sizeY <= 0 || sizeZ <= 0) return mesh;
+
+  // Non-cube blocks are meshed from their shape table, not the greedy full-cube path. They are
+  // collected here and emitted after the greedy pass, so a slab or stair reads as its own shape
+  // (C3) instead of a full cube. Full-cube blocks stay on the greedy path, which is where the
+  // exposed-face culling and merging happen.
+  struct ShapeBlock {
+    int x, y, z;
+    uint32_t color;
+  };
+  std::vector<ShapeBlock> shapeBlocks;
+
+  // Collect the non-cube blocks in this section once, so they are meshed by shape rather than as
+  // cubes. A block is "non-cube" when its shape table gives something other than the full block.
+  const int secMinX = sectionX * kSectionSize;
+  const int secMinY = sectionY * kSectionSize;
+  const int secMinZ = sectionZ * kSectionSize;
+  const int secMaxX = std::min(secMinX + kSectionSize, sizeX);
+  const int secMaxY = std::min(secMinY + kSectionSize, sizeY);
+  const int secMaxZ = std::min(secMinZ + kSectionSize, sizeZ);
+  for (int y = std::max(secMinY, layerMin); y < std::min(secMaxY, layerMax + 1); ++y) {
+    for (int z = secMinZ; z < secMaxZ; ++z) {
+      for (int x = secMinX; x < secMaxX; ++x) {
+        const uint32_t state = schematic.blockAt(x, y, z);
+        if (state == 0 || state >= schematic.palette.size()) continue;
+        const core::BlockState &block = schematic.palette.at(state);
+        if (core::BlockShape::neverRenders(block)) continue;
+        if (core::BlockShape::isCube(block)) continue;
+        shapeBlocks.push_back({x, y, z, render::BlockColors::forBlock(block.name).argb});
+      }
+    }
+  }
 
   std::vector<MaskCell> mask;
   for (const FaceDir &face : kFaces) {
@@ -138,13 +226,18 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
           if (y < layerMin || y > layerMax) continue;
           if (!isSolid(schematic, x, y, z)) continue;
 
+          const uint32_t state = schematic.blockAt(x, y, z);
+          // A non-cube block is meshed by its shape, not as a full cube, so it does not fill the
+          // greedy mask. Its neighbours still cull against it (it is solid), so a slab under a
+          // full-cube block still hides that block's bottom face.
+          if (!core::BlockShape::isCube(schematic.palette.at(state))) continue;
+
           const int sign = face.positive ? 1 : -1;
           const int nx = x + (face.n == 0 ? sign : 0);
           const int ny = y + (face.n == 1 ? sign : 0);
           const int nz = z + (face.n == 2 ? sign : 0);
           if (isSolid(schematic, nx, ny, nz)) continue; // interior face
 
-          const uint32_t state = schematic.blockAt(x, y, z);
           MaskCell &cell = mask[static_cast<size_t>(a) + static_cast<size_t>(b) * aSize];
           cell.filled = true;
           cell.color = render::BlockColors::forBlock(schematic.palette.at(state).name).argb;
@@ -192,6 +285,18 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
           a += width;
         }
       }
+    }
+  }
+
+  // Emit the non-cube blocks from their shape table.
+  for (const ShapeBlock &block : shapeBlocks) {
+    const core::BlockState &state = schematic.palette.at(schematic.blockAt(block.x, block.y, block.z));
+    for (const core::ShapeBox &box : core::BlockShape::boxesFor(state)) {
+      emitBox(mesh, {box.minX + static_cast<float>(block.x), box.minY + static_cast<float>(block.y),
+                     box.minZ + static_cast<float>(block.z),
+                     box.maxX + static_cast<float>(block.x), box.maxY + static_cast<float>(block.y),
+                     box.maxZ + static_cast<float>(block.z)},
+              block.color, mesh.originX, mesh.originY, mesh.originZ);
     }
   }
 

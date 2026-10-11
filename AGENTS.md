@@ -156,6 +156,9 @@ src/render/HudOverlay.cpp src/mod/ControllerNavigator.cpp src/mod/JsonConfig.cpp
 - **GL resources are freed on the render thread.** `disable()`/`unload()` set `mGlShutdownRequested`;
   the next render frame calls `releaseGlResources()` (buffers + programs) with the context current,
   then unregisters the callbacks. Never free GL objects off the render thread.
+- **Block colours are data (`data/block_colors.json`), loaded over an embedded default.** `tools/gen_block_colors.py` generates the file (hand table by default, or measured from a vanilla resource pack with `--textures`). Unknown blocks get a deterministic hash colour and are **recorded** (`BlockColors::unknownBlocks()`), never fabricated silently. The file is packaged via `build.sh`/`build.ps1 --extra`.
+- **Non-cube blocks are meshed from `core/BlockShape.hpp`, not as full cubes.** `boxesFor(state)` returns axis-aligned boxes; `isCube` is true only for a full block. The mesher's greedy full-cube path skips non-cubes (but they still count as solid for neighbour culling); they are emitted as boxes afterward. `neverRenders` (air, structure void, light, barrier-unless-toggled) blocks are neither drawn nor solid.
+- **The verifier has six verdicts, not four.** `Correct, Missing, WrongBlock, WrongState, Extra, Unknown`. `Unknown` (an unreadable/unloaded block) is never counted as `Missing` or as `Correct`, and is excluded from `percentComplete`'s denominator. `LiveMaterials` counts `WrongBlock`/`WrongState` as outstanding and ignores `Unknown`. `MismatchPalette` (default/colour-blind/high-contrast presets) colours them.
 - **The camera comes from `LocalPlayerFeed`, not a matrix scan.** It hooks `ClientInstance`'s
   local-player slot 31 **by RTTI name** and reads `Actor+0x230` (position) / `+0x238` (yaw,pitch),
   the same offsets the launcher's own feed uses; they are shared by 1.26.33 / 1.26.50 / 1.26.51.
