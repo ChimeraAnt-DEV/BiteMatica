@@ -14,6 +14,7 @@
 
 #include "core/Schematic.hpp"
 #include "format/SchematicFormat.hpp"
+#include "litematica/BlockInfo.hpp"
 #include "litematica/BlockTargeting.hpp"
 #include "litematica/EasyPlace.hpp"
 #include "litematica/LayerRange.hpp"
@@ -434,6 +435,125 @@ void testRayCast() {
   check(anchor.z == -4, "the placement anchor sits in front of the wall");
 }
 
+/// The DDA edge cases the brief calls out (E2): axis-aligned rays, diagonal rays, a ray starting
+/// inside a block, negative coordinates, and large coordinates.
+void testRayCastEdgeCases() {
+  std::printf("testRayCastEdgeCases\n");
+  auto solidAt = [](const std::vector<bitematica::core::BlockPos> &blocks) {
+    return [blocks](int x, int y, int z) {
+      for (const auto &b : blocks) {
+        if (b.x == x && b.y == y && b.z == z) return true;
+      }
+      return false;
+    };
+  };
+  using bitematica::litematica::BlockTargeting;
+
+  // Axis-aligned +X.
+  {
+    auto hit = BlockTargeting::cast({0.5f, 0.5f, 0.5f}, {1, 0, 0}, 10.0f,
+                                    solidAt({{4, 0, 0}}));
+    check(hit.hit && hit.block.x == 4 && hit.normal.x == -1, "an +X ray hits and reports the -X face");
+  }
+  // Axis-aligned +Y.
+  {
+    auto hit = BlockTargeting::cast({0.5f, 0.5f, 0.5f}, {0, 1, 0}, 10.0f, solidAt({{0, 3, 0}}));
+    check(hit.hit && hit.block.y == 3 && hit.normal.y == -1, "a +Y ray hits the block above");
+  }
+  // Diagonal ray (equal X and Z) hits a block on the diagonal.
+  {
+    auto hit = BlockTargeting::cast({0.5f, 0.5f, 0.5f}, {1, 0, 1}, 10.0f, solidAt({{3, 0, 3}}));
+    check(hit.hit && hit.block.x == 3 && hit.block.z == 3, "a diagonal ray reaches the diagonal block");
+  }
+  // A ray starting inside a solid block reports that block at distance 0.
+  {
+    auto hit = BlockTargeting::cast({0.5f, 0.5f, 0.5f}, {1, 0, 0}, 10.0f, solidAt({{0, 0, 0}}));
+    check(hit.hit && hit.block.x == 0 && hit.block.y == 0 && hit.block.z == 0,
+          "a ray starting inside a block reports it");
+    check(hit.distance == 0.0f, "the distance is zero when starting inside");
+  }
+  // Negative coordinates.
+  {
+    auto hit = BlockTargeting::cast({-5.5f, -5.5f, -5.5f}, {-1, 0, 0}, 10.0f,
+                                    solidAt({{-9, -6, -6}}));
+    check(hit.hit && hit.block.x == -9, "a ray through negative coordinates hits correctly");
+  }
+  // Large coordinates.
+  {
+    auto hit = BlockTargeting::cast({29999990.5f, 64.5f, 0.5f}, {1, 0, 0}, 10.0f,
+                                    solidAt({{29999994, 64, 0}}));
+    check(hit.hit && hit.block.x == 29999994, "a ray at large coordinates hits correctly");
+  }
+  // maxDistance bounds the walk: the block is past the limit, so it is a miss.
+  {
+    auto hit = BlockTargeting::cast({0.5f, 0.5f, 0.5f}, {1, 0, 0}, 2.0f, solidAt({{10, 0, 0}}));
+    check(!hit.hit, "a block beyond maxDistance is a miss");
+  }
+  // A zero direction is refused rather than divided by.
+  {
+    auto hit = BlockTargeting::cast({0.5f, 0.5f, 0.5f}, {0, 0, 0}, 10.0f, solidAt({{1, 0, 0}}));
+    check(!hit.hit, "a zero direction misses");
+  }
+}
+
+// --- block info (E5/F11) --------------------------------------------------------------
+
+void testBlockInfo() {
+  std::printf("testBlockInfo\n");
+  // A 1x1x1 schematic wanting stone at the origin.
+  bitematica::core::Schematic schematic;
+  schematic.bounds = {{0, 0, 0}, {0, 0, 0}};
+  schematic.allocateBlocks();
+  bitematica::core::BlockState stone;
+  stone.name = "minecraft:stone";
+  schematic.palette.intern(bitematica::core::BlockState{});
+  schematic.setBlock(0, 0, 0, schematic.palette.intern(stone));
+  bitematica::world::Placement placement;
+  placement.origin = {0, 0, 0};
+
+  // World readable and matching.
+  {
+    SolidWorld world;
+    world.setSolid({0, 0, 0}, "minecraft:stone");
+    const auto info = bitematica::litematica::describeTarget({0, 0, 0}, schematic, placement, 0,
+                                                             &world);
+    check(info.inPlacement && info.hasWanted, "the target is inside the placement");
+    check(info.wanted.baseName() == "minecraft:stone", "the schematic wants stone");
+    check(info.verdict == bitematica::world::BlockStatus::Correct, "the block is correct");
+    check(info.describe().find("correct") != std::string::npos, "the description names the verdict");
+  }
+  // World readable, missing.
+  {
+    SolidWorld world;
+    const auto info = bitematica::litematica::describeTarget({0, 0, 0}, schematic, placement, 0,
+                                                             &world);
+    check(info.verdict == bitematica::world::BlockStatus::Missing, "an empty cell is missing");
+  }
+  // World readable, wrong block.
+  {
+    SolidWorld world;
+    world.setSolid({0, 0, 0}, "minecraft:gold_block");
+    const auto info = bitematica::litematica::describeTarget({0, 0, 0}, schematic, placement, 0,
+                                                             &world);
+    check(info.verdict == bitematica::world::BlockStatus::WrongBlock, "a different block is wrong");
+  }
+  // World not readable: verdict is Unknown, never Missing.
+  {
+    const auto info = bitematica::litematica::describeTarget({0, 0, 0}, schematic, placement, 0,
+                                                             nullptr);
+    check(info.verdict == bitematica::world::BlockStatus::Unknown,
+          "no world source means unknown, not missing");
+    check(!info.hasFound, "the world side is absent");
+  }
+  // A position outside the placement.
+  {
+    SolidWorld world;
+    const auto info = bitematica::litematica::describeTarget({50, 50, 50}, schematic, placement, 0,
+                                                             &world);
+    check(!info.inPlacement, "a far position is outside the placement");
+  }
+}
+
 // --- Easy Place -----------------------------------------------------------------------
 
 void testEasyPlace() {
@@ -739,6 +859,8 @@ int main() {
   testBlockStateTransform();
   testOriginAndNudge();
   testRayCast();
+  testRayCastEdgeCases();
+  testBlockInfo();
   testEasyPlace();
   testPasteCommands();
   testMenuModel();
