@@ -1330,17 +1330,35 @@ void BiteMaticaMod::applyTool() {
         return;
       }
       const auto commands = bitematica::litematica::PasteJob::build(schematic(), mPlacement);
-      char buffer[128];
-      std::snprintf(buffer, sizeof(buffer), "Paste: %zu command(s) ready (see exports)",
-                    commands.size());
-      // Write the commands to a file the player can run, so nothing is placed without consent.
       const std::filesystem::path exports = mSelf->getDataDir() / "exports";
       std::error_code ec;
       std::filesystem::create_directories(exports, ec);
-      std::ofstream out(exports / "paste_commands.txt", std::ios::trunc);
-      if (out) {
-        for (const std::string &command : commands) out << "/" << command << "\n";
+      // Two files: the copyable command list (with the leading slash) and an .mcfunction body
+      // (H7) a function pack can run with one `/function`.
+      {
+        std::ofstream out(exports / "paste_commands.txt", std::ios::trunc);
+        if (out) {
+          for (const std::string &command : commands) out << "/" << command << "\n";
+        }
       }
+      {
+        std::ofstream out(exports / "paste.mcfunction", std::ios::trunc);
+        if (out) out << bitematica::litematica::PasteJob::mcfunctionText(commands);
+      }
+      // H8: the overwrite count, so the user knows what the paste would replace. Nothing is placed
+      // here; the commands are files the player chooses to run.
+      long long overwrites = 0;
+      if (mWorldSource.available()) {
+        overwrites = bitematica::litematica::PasteJob::overwriteCount(
+            schematic(), mPlacement, [this](const BlockPos &p) {
+              BlockState state;
+              return mWorldSource.readBlock(p, state) && !state.isAir();
+            });
+      }
+      char buffer[192];
+      std::snprintf(buffer, sizeof(buffer),
+                    "Paste: %zu command(s) written to exports (would overwrite %lld block(s))",
+                    commands.size(), overwrites);
       setStatus(buffer);
       return;
     }
