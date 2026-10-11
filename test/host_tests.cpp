@@ -25,8 +25,6 @@
 #include "nbt/NbtReader.hpp"
 #include "nbt/NbtWriter.hpp"
 #include "render/HudOverlay.hpp"
-#include "render/MeshBuilder.hpp"
-#include "render/ViewCamera.hpp"
 
 namespace {
 
@@ -197,65 +195,6 @@ void testDetection() {
         "png extension rejected");
 }
 
-// --- mesh + camera ------------------------------------------------------------------
-
-void testCameraProjection() {
-  std::printf("testCameraProjection\n");
-  bitematica::render::ViewCamera camera;
-  camera.yawDegrees = 0.0f;
-  camera.pitchDegrees = 0.0f;
-  camera.scale = 10.0f;
-  camera.centerX = 100.0f;
-  camera.centerY = 100.0f;
-
-  const auto p = camera.projectCentered(0.0f, 0.0f, 0.0f);
-  checkNear(p.x, 100.0f, 0.01f, "origin projects to center x");
-  checkNear(p.y, 100.0f, 0.01f, "origin projects to center y");
-
-  const auto right = camera.projectCentered(1.0f, 0.0f, 0.0f);
-  checkNear(right.x, 110.0f, 0.01f, "+x projects to the right");
-}
-
-void testMeshBuildsAndCulls() {
-  std::printf("testMeshBuildsAndCulls\n");
-  const auto result =
-      bitematica::format::SchematicFormat::readPath(fixture("cube.litematic"));
-  check(result.success, "fixture loads for meshing");
-  if (!result.success) return;
-
-  bitematica::render::ViewCamera camera;
-  camera.scale = 8.0f;
-  camera.centerX = 400.0f;
-  camera.centerY = 300.0f;
-
-  const auto mesh = bitematica::render::MeshBuilder::build(result.schematic, camera, 100000);
-  check(!mesh.triangles.empty(), "mesh is non-empty");
-  check(mesh.visibleBlocks == 26, "26 visible blocks (the 3x3x3 center is enclosed)");
-  // Each visible block contributes at most 3 front faces x 2 triangles = 6, never more.
-  check(mesh.triangles.size() <= 26u * 6u, "triangle count within the face-cull bound");
-  check(mesh.triangles.size() >= 26u * 2u, "at least one face drawn per block");
-  check(!mesh.truncated, "small schematic is not truncated");
-
-  // Painter order: depths must be non-increasing.
-  bool sorted = true;
-  for (size_t i = 1; i < mesh.triangles.size(); ++i) {
-    if (mesh.triangles[i].depth > mesh.triangles[i - 1].depth + 0.001f) sorted = false;
-  }
-  check(sorted, "triangles are sorted far-to-near");
-}
-
-void testMeshTruncation() {
-  std::printf("testMeshTruncation\n");
-  const auto result =
-      bitematica::format::SchematicFormat::readPath(fixture("cube.litematic"));
-  if (!result.success) return;
-  bitematica::render::ViewCamera camera;
-  // Cap below the 27 visible blocks.
-  const auto mesh = bitematica::render::MeshBuilder::build(result.schematic, camera, 5);
-  check(mesh.truncated, "cap is honored and reported");
-  check(mesh.visibleBlocks == 26, "visible count still reports the truth");
-}
-
 // --- toolbar + controller -----------------------------------------------------------
 
 void testToolbarHitTest() {
@@ -325,10 +264,10 @@ void testControllerNavigation() {
   check(orderMatches, "controller grid order matches the toolbar order");
 }
 
-// --- overlay commands ---------------------------------------------------------------
+// --- HUD chrome ---------------------------------------------------------------------
 
-void testOverlayCommands() {
-  std::printf("testOverlayCommands\n");
+void testChromeCommands() {
+  std::printf("testChromeCommands\n");
   const auto result =
       bitematica::format::SchematicFormat::readPath(fixture("cube.litematic"));
   if (!result.success) return;
@@ -336,26 +275,20 @@ void testOverlayCommands() {
   bitematica::mod::Config config;
   config.showToolbar = true;
   config.showMaterialList = true;
-  bitematica::render::ViewCamera camera;
-  camera.centerX = 400;
-  camera.centerY = 300;
 
   const auto buttons = bitematica::render::HudOverlay::layoutToolbar(config);
   const auto materials = bitematica::core::MaterialList::build(result.schematic);
   const auto commands = bitematica::render::HudOverlay::buildCommands(
-      result.schematic, config, camera, buttons, materials, "litematic 3x3x3", true);
-  check(!commands.empty(), "overlay emits commands");
+      config, buttons, materials, "litematic 3x3x3", true);
+  check(!commands.empty(), "chrome emits commands");
 
-  bool sawTriangle = false;
   bool sawToolbarText = false;
   bool sawMaterial = false;
   for (const auto &c : commands) {
-    if (c.kind == bitematica::render::UiCommand::Kind::Triangle) sawTriangle = true;
     if (c.kind == bitematica::render::UiCommand::Kind::Text && c.text == "Materials")
       sawMaterial = true;
     if (c.kind == bitematica::render::UiCommand::Kind::Text && c.text == "M") sawToolbarText = true;
   }
-  check(sawTriangle, "mesh triangles are present");
   check(sawMaterial, "material panel header present");
   check(sawToolbarText, "toolbar labels present");
 
@@ -365,17 +298,47 @@ void testOverlayCommands() {
   check(((faded >> 24) & 0xff) < ((opaque >> 24) & 0xff), "opacity lowers alpha");
 }
 
-void testHiddenModeDrawsNoMesh() {
-  std::printf("testHiddenModeDrawsNoMesh\n");
+/// The schematic must never be drawn as HUD geometry. This is the regression guard for the
+/// "software overlay" fallback: the chrome command vocabulary has no triangle primitive, so
+/// there is no way to emit schematic geometry through it, and the material panel is the only
+/// thing whose presence depends on a schematic being loaded.
+void testChromeNeverDrawsSchematicGeometry() {
+  std::printf("testChromeNeverDrawsSchematicGeometry\n");
   const auto result =
       bitematica::format::SchematicFormat::readPath(fixture("cube.litematic"));
   if (!result.success) return;
+
   bitematica::mod::Config config;
-  config.renderMode = bitematica::mod::RenderMode::Hidden;
-  bitematica::render::ViewCamera camera;
-  const auto commands = bitematica::render::HudOverlay::buildMeshCommands(
-      result.schematic, config, camera);
-  check(commands.empty(), "hidden mode emits no geometry");
+  config.showToolbar = true;
+  config.showMaterialList = true;
+  config.renderMode = bitematica::mod::RenderMode::Skeleton; // most tempting to fake with chrome
+
+  const auto buttons = bitematica::render::HudOverlay::layoutToolbar(config);
+  const auto materials = bitematica::core::MaterialList::build(result.schematic);
+
+  // With no schematic loaded the panel is not drawn; with one loaded it is. Neither path emits a
+  // triangle, and the command count is bounded by the toolbar grid plus a small material panel —
+  // there is no per-block command explosion.
+  const auto noSchematic = bitematica::render::HudOverlay::buildCommands(
+      config, buttons, {}, "nothing loaded", false);
+  const auto withSchematic = bitematica::render::HudOverlay::buildCommands(
+      config, buttons, materials, "loaded", true);
+
+  // Every emitted command is chrome (a rect or text). The vocabulary has no geometry primitive at
+  // all — `UiCommand::Kind` is only Rect/Text — so schematic geometry cannot be drawn through the
+  // HUD even by mistake.
+  bool onlyChrome = true;
+  for (const auto &c : withSchematic) {
+    if (c.kind != bitematica::render::UiCommand::Kind::Rect &&
+        c.kind != bitematica::render::UiCommand::Kind::Text) {
+      onlyChrome = false;
+    }
+  }
+  check(onlyChrome, "every HUD command is chrome (rect or text)");
+  check(withSchematic.size() < 200, "chrome command count is bounded, not per-block");
+  // The panel only appears when there is something to count.
+  check(noSchematic.size() < withSchematic.size(),
+        "the material panel is only emitted when a schematic is loaded");
 }
 
 void testConfigNormalize() {
@@ -466,13 +429,10 @@ int main() {
   testLegacySchematic();
   testStructure();
   testDetection();
-  testCameraProjection();
-  testMeshBuildsAndCulls();
-  testMeshTruncation();
   testToolbarHitTest();
   testControllerNavigation();
-  testOverlayCommands();
-  testHiddenModeDrawsNoMesh();
+  testChromeCommands();
+  testChromeNeverDrawsSchematicGeometry();
   testConfigNormalize();
   testConfigRoundTrip();
   testStructureExportRoundTrip();

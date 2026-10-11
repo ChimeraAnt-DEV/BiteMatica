@@ -84,6 +84,11 @@ jobs:
           chmod +x test/link_check.sh
           PRELOADER_INCLUDE=third_party/preloader-android/include test/link_check.sh
 
+      - name: Check no schematic geometry can be drawn through HUD draw commands
+        run: |
+          chmod +x test/hud_geometry_guard.sh
+          test/hud_geometry_guard.sh
+
       - name: Build and package .AntEgg
         run: |
           chmod +x build.sh

@@ -84,7 +84,8 @@ MenuPage MenuBuilder::buildMain(const Context &context) {
 
   page.widgets.push_back(header("Status"));
   page.widgets.push_back(info("main.seam", "Rendering",
-                              context.worldSpace ? "world-space (GL)" : "software overlay"));
+                              context.worldSpace ? "world-space (GL)"
+                                                 : "unavailable (update launcher)"));
   page.widgets.push_back(info("main.verify", "World readable", yesNo(context.worldReadable)));
   page.widgets.push_back(info("main.status", "Status", context.statusLine));
   page.widgets.push_back(
