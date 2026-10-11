@@ -105,24 +105,44 @@ high** for the signature; the internal sub-chunk offset (`this+0x40/0x42`) is in
 
 ## 4. What could NOT be established here (and is required for the reader)
 
-Two things are needed beyond the slot, and this analysis did **not** confirm them:
+Two things are needed beyond the slot, and this analysis did **not** confirm them with
+confidence. They are version-specific *member offsets*, and unlike the vtable slot they
+cannot be pinned by RTTI/vtable structure alone — they are plain struct offsets, and the
+functions that read them are non-trivial (a `weak_ptr` lock, a `std::string` access), so
+they do not show up as a trivial `ldr x0,[x0,#imm]; ret` getter that could be matched to a
+named method.
 
 1. **How to obtain the `BlockSource*`.** The engine gets it from the local player:
    `Actor -> Dimension -> BlockSource`. The reference build (1.26.4005.0) uses
-   `Actor+0x1C8` (Dimension, a `weak_ptr`) and `Dimension+0xF0` (BlockSource), but those
-   offsets are version-specific and were **not** verified on 1.26.10/52/60.30 here.
+   `Actor+0x1C8` (Dimension, a `weak_ptr` — so the field is a two-word control block, not a
+   plain pointer) and `Dimension+0xF0` (BlockSource). Neither was verified here.
    The preloader's `LocalPlayerFeed` already resolves the local player (ClientInstance
    slot 31) and knows `Actor+0x230/0x238`; it does not know the Dimension/BlockSource
    offsets.
 2. **How to turn `Block*` into a block id.** `Block -> BlockLegacy -> name`. The
-   reference uses `BlockLegacy = Block+0x68` and `name = BlockLegacy+0xE8` (a
-   `std::string`); a scan of the binary found `+0x68` as the most common first deref of
-   `getBlock`'s return (83 sites), which is consistent, but the full
-   `+0x68 -> +0xE8` chain was not pinned to a single caller here.
+   reference uses `BlockLegacy = Block+0x68` and `name = BlockLegacy+0xE8`. A scan of the
+   binary found `+0x68` as the most common first deref of `getBlock`'s return (83 sites),
+   which is consistent with `BlockLegacy = Block+0x68`. The `name` offset was **not**
+   confirmed: scanning for `ldr xR,[x0,#0x68] ; add x0,xR,#imm` shows the dominant
+   returned member is `+0xC8` (538 sites), not `+0xE8`, so the name offset differs between
+   1.26.4005.0 and 1.26.52 (or the reference's field layout differs).
 
-Both are the "confirmed reader" the design already requires: they are supplied by the
-human per build, and the sanity probe (feet not air, 400 blocks up is air) catches a
-wrong offset by disabling the source for the session.
+**Vtable addresses found for the surrounding types** (so a reader can be built once the
+member offsets are supplied):
+
+| Type | typeinfo name | primary vtable (1.26.52) |
+| --- | --- | --- |
+| `BlockSource` | `11BlockSource` | `0x13060d48` |
+| `Block` | `5Block` | `0x130f0838` |
+| `Dimension` | `9Dimension` | `0x12b1abc0` |
+| `Actor` | `5Actor` | `0x12fe7840` |
+| `LocalPlayer` | `11LocalPlayer` | `0x12d08f90` |
+
+All three remaining values are the "confirmed reader" the design already requires: they
+are supplied by the human per build, and the sanity probe (feet not air, 400 blocks up is
+air) catches a wrong offset by disabling the source for the session. **This is why the
+probe exists** — the slot is the part that can be derived statically, and the member
+offsets are the part that must be confirmed against a live process.
 
 ## 5. Config values
 
@@ -150,8 +170,12 @@ constexpr std::size_t kBlockSourceGetBlockSlot = 2;
 // CONFIRM per build (from the reference build 1.26.4005.0; sanity-probed at runtime):
 constexpr int32_t kActorDimension        = 0x1C8;  // Actor  -> Dimension (weak_ptr; pointer half)
 constexpr int32_t kDimensionBlockSource  = 0xF0;   // Dimension -> BlockSource*
-constexpr int32_t kBlockBlockLegacy      = 0x68;   // Block -> BlockLegacy*
+constexpr int32_t kBlockBlockLegacy      = 0x68;   // Block -> BlockLegacy*  (consistent: the
+                                                   // most common first deref of getBlock's result)
 constexpr int32_t kBlockLegacyName       = 0xE8;   // BlockLegacy -> std::string name
+                                                   // NOT confirmed on 1.26.52: the dominant returned
+                                                   // member after +0x68 is +0xC8, not +0xE8. Verify
+                                                   // this one against a live process first.
 
 using GetBlockFn = void *(*)(void *self, const void *blockPos);
 
