@@ -42,6 +42,9 @@ def collect_directory(root, prefix):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True, help="path to egg.json")
+    parser.add_argument("--preloader-manifest", required=True,
+                        help="path to manifest.json (the preloader's native-mod manifest)")
+    parser.add_argument("--icon", help="PNG packaged as icon.png and referenced by manifest.json")
     parser.add_argument("--library", required=True, help="path to the built .so")
     parser.add_argument("--entry", required=True, help="archive path of the .so")
     parser.add_argument("--config", help="directory packaged as config/")
@@ -53,21 +56,44 @@ def main():
 
     if not os.path.isfile(args.manifest):
         fail("manifest not found: " + args.manifest)
+    if not os.path.isfile(args.preloader_manifest):
+        fail("preloader manifest not found: " + args.preloader_manifest)
     if not os.path.isfile(args.library):
         fail("library not found: " + args.library)
 
     with open(args.manifest, encoding="utf-8") as fp:
         manifest = json.load(fp)
+    with open(args.preloader_manifest, encoding="utf-8") as fp:
+        preloader_manifest = json.load(fp)
 
-    # The loader rejects a manifest whose entry_point is not inside the archive, so the
-    # two must agree. Checking here turns a silent bad package into an obvious error.
+    # Two manifests, two readers. `egg.json` is what .AntEgg validation reads; the
+    # preloader reads `manifest.json` at the extracted mod root and refuses to load a
+    # library unless that manifest is present, is `type: "preload-native"`, and names an
+    # entry that exists and ends in `.so`. Both must agree on the entry point, or the
+    # package validates and then silently fails to load.
     if manifest.get("entry_point") != args.entry:
-        fail("manifest entry_point (%s) does not match --entry (%s)"
+        fail("egg.json entry_point (%s) does not match --entry (%s)"
              % (manifest.get("entry_point"), args.entry))
     if not args.entry.lower().endswith(".so"):
         fail("a native entry_point must end with .so")
+    if preloader_manifest.get("type") != "preload-native":
+        fail("manifest.json must have type 'preload-native'")
+    if preloader_manifest.get("entry") != args.entry:
+        fail("manifest.json entry (%s) does not match --entry (%s)"
+             % (preloader_manifest.get("entry"), args.entry))
 
-    entries = [("egg.json", args.manifest), (args.entry, args.library)]
+    entries = [
+        ("egg.json", args.manifest),
+        ("manifest.json", args.preloader_manifest),
+        (args.entry, args.library),
+    ]
+    if args.icon:
+        if not os.path.isfile(args.icon):
+            fail("icon not found: " + args.icon)
+        # manifest.json's icon path must resolve inside the package.
+        if preloader_manifest.get("icon") != "icon.png":
+            fail("manifest.json icon must be 'icon.png' when --icon is passed")
+        entries.append(("icon.png", args.icon))
     if args.config:
         if not os.path.isdir(args.config):
             fail("config directory not found: " + args.config)

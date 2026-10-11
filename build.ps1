@@ -94,6 +94,8 @@ if (-not (Test-Path $library)) { throw "expected library not produced: $library"
 Write-Host "==> Packaging .AntEgg"
 python3 (Join-Path $Root "tools\pack_antegg.py") `
     --manifest (Join-Path $Root "packaging\egg.json") `
+    --preloader-manifest (Join-Path $Root "packaging\manifest.json") `
+    --icon (Join-Path $Root "assets\icon\icon.png") `
     --library $library `
     --entry bin/libbitematica.so `
     --config (Join-Path $Root "packaging\config") `
