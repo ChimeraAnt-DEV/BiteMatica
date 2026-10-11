@@ -73,6 +73,7 @@ struct ToolbarButton {
     ApplyTool,      // act with the current tool mode
     OpenMenu,       // open the in-game menu
     CycleMenuTab,   // switch menu tab
+    PanicToggle,    // J6: hide/show all rendering instantly
   };
   Action action{Action::CycleMode};
   std::string label;

@@ -123,12 +123,16 @@ private:
     else if (key == "showOutlines") config.showOutlines = value;
     else if (key == "verifyAgainstWorld") config.verifyAgainstWorld = value;
     else if (key == "verifyExtras") config.verifyExtras = value;
+    else if (key == "panicHidden") config.panicHidden = value;
+    else if (key == "highContrast") config.highContrast = value;
   }
 
   static void applyFloat(const std::string &key, float value, Config &config) {
     if (key == "outlineWidth") config.outlineWidth = value;
     else if (key == "polygonOffsetFactor") config.polygonOffsetFactor = value;
     else if (key == "polygonOffsetUnits") config.polygonOffsetUnits = value;
+    else if (key == "uiScale") config.uiScale = value;
+    else if (key == "textScale") config.textScale = value;
   }
 
   static void applyNumber(const std::string &key, int value, Config &config) {
@@ -150,6 +154,7 @@ private:
     else if (key == "maxRenderDistance") config.maxRenderDistance = value;
     else if (key == "verifyMismatchMode") config.verifyMismatchMode = value;
     else if (key == "verifyBlocksPerFrame") config.verifyBlocksPerFrame = value;
+    else if (key == "palettePreset") config.palettePreset = value;
   }
 
   const std::string &mText;
@@ -220,6 +225,11 @@ std::string JsonConfig::serialize(const Config &config) {
   out += "  \"verifyBlocksPerFrame\": " + std::to_string(config.verifyBlocksPerFrame) + ",\n";
   out += "  \"verifyBlockSourceSlot\": " + std::to_string(config.verifyBlockSourceSlot) + ",\n";
   out += "  \"verifyGameVersionTag\": \"" + escape(config.verifyGameVersionTag) + "\",\n";
+  out += "  \"panicHidden\": " + boolean(config.panicHidden) + ",\n";
+  out += "  \"uiScale\": " + std::to_string(config.uiScale) + ",\n";
+  out += "  \"textScale\": " + std::to_string(config.textScale) + ",\n";
+  out += "  \"highContrast\": " + boolean(config.highContrast) + ",\n";
+  out += "  \"palettePreset\": " + std::to_string(config.palettePreset) + ",\n";
   out += "  \"toolbarX\": " + std::to_string(config.toolbarX) + ",\n";
   out += "  \"toolbarY\": " + std::to_string(config.toolbarY) + ",\n";
   out += "  \"materialX\": " + std::to_string(config.materialX) + ",\n";

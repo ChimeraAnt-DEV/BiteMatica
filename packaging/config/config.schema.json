@@ -136,6 +136,37 @@
       "type": "integer",
       "minimum": -1
     },
+    "panicHidden": {
+      "title": "Panic Hide",
+      "description": "Hide all rendering instantly without unloading. Toggle with the H toolbar button.",
+      "type": "boolean"
+    },
+    "uiScale": {
+      "title": "UI Scale",
+      "description": "Toolbar button scale. Clamped to a 1.2 minimum so touch targets stay above 48 dp.",
+      "type": "number",
+      "minimum": 1.2,
+      "maximum": 3.0
+    },
+    "textScale": {
+      "title": "Text Scale",
+      "description": "Status line and panel text size.",
+      "type": "number",
+      "minimum": 0.8,
+      "maximum": 2.5
+    },
+    "highContrast": {
+      "title": "High Contrast",
+      "description": "Opaque backgrounds and maximum text contrast.",
+      "type": "boolean"
+    },
+    "palettePreset": {
+      "title": "Mismatch Palette",
+      "description": "0 default, 1 colour-blind friendly, 2 high contrast.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2
+    },
     "toolbarX": { "title": "Toolbar X", "type": "integer", "minimum": 0 },
     "toolbarY": { "title": "Toolbar Y", "type": "integer", "minimum": 0 },
     "materialX": { "title": "Material Panel X", "type": "integer", "minimum": 0 },

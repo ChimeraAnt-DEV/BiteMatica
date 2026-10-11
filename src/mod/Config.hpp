@@ -82,6 +82,18 @@ struct Config {
   /// another. Empty means "not verified for any version".
   std::string verifyGameVersionTag;
 
+  /// Panic toggle (J6): disable all rendering instantly without unloading. Off by default.
+  bool panicHidden = false;
+  /// Toolbar button scale (J4). 1.0 is the 40 px default; the minimum enforces a large-enough touch
+  /// target. Larger for a tablet, smaller only down to the accessibility floor.
+  float uiScale = 1.0f;
+  /// Text size scale for the status line and panels (J9).
+  float textScale = 1.0f;
+  /// High-contrast mode (J9): opaque backgrounds, maximum text contrast.
+  bool highContrast = false;
+  /// Mismatch palette preset (C6/J9): 0 default, 1 colour-blind, 2 high-contrast.
+  int palettePreset = 0;
+
   /// Toolbar anchor in HUD pixels (top-left of the toolbar's panel).
   int toolbarX = 24;
   int toolbarY = 120;
@@ -138,6 +150,13 @@ struct Config {
     if (verifyMismatchMode < 0 || verifyMismatchMode > 2) verifyMismatchMode = 0;
     if (verifyBlocksPerFrame < 100) verifyBlocksPerFrame = 100;
     if (verifyBlocksPerFrame > 200000) verifyBlocksPerFrame = 200000;
+    // The touch-target floor (J4): a scale below 1.2 would put buttons under 48 dp, which is the
+    // accessibility minimum, so it is clamped up rather than allowed.
+    if (uiScale < 1.2f) uiScale = 1.2f;
+    if (uiScale > 3.0f) uiScale = 3.0f;
+    if (textScale < 0.8f) textScale = 0.8f;
+    if (textScale > 2.5f) textScale = 2.5f;
+    if (palettePreset < 0 || palettePreset > 2) palettePreset = 0;
     // A slot of 0 or below means "unverified"; anything above the vtable's plausible size is
     // nonsense and is treated the same way.
     if (verifyBlockSourceSlot < 0 || verifyBlockSourceSlot > 512) verifyBlockSourceSlot = -1;
