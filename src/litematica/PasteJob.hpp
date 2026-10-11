@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,27 @@ public:
   /// The Bedrock block id for a state, including the `["state"=value]` suffix Bedrock accepts in
   /// commands. Java-style states are translated by the caller before this is reached.
   static std::string blockIdFor(const core::BlockState &state);
+
+  /// Joins commands into a `.mcfunction` file body (one command per line, no leading slash). A
+  /// function pack can run it with a single `/function`. (H7)
+  static std::string mcfunctionText(const std::vector<std::string> &commands);
+
+  /// Counts the non-air world blocks a paste would overwrite (H8). The caller shows this in a
+  /// confirmation prompt; nothing is pasted until the user confirms.
+  ///
+  /// @param isSolid a predicate for the world block at a position
+  static long long overwriteCount(const core::Schematic &schematic,
+                                  const world::Placement &placement,
+                                  const std::function<bool(const core::BlockPos &)> &isSolid,
+                                  const PasteOptions &options = PasteOptions{});
+
+  /// The next block to place in survival (H9): the nearest missing block in the lowest incomplete
+  /// layer. Returns false when nothing is missing. This is *guidance* — it tells the player where to
+  /// look, it does not place anything.
+  static bool nextSuggestedBlock(const core::Schematic &schematic,
+                                 const world::Placement &placement,
+                                 const std::vector<uint8_t> &statuses, int layerMin, int layerMax,
+                                 core::BlockPos &outWorld, core::BlockState &outWanted);
 };
 
 } // namespace bitematica::litematica
