@@ -51,16 +51,13 @@ It is a *bite-sized Litematica for Bedrock* — rebuilt from the ground up for a
 
 Detection is by **content first**, not the file extension: BiteMatica decompresses the file, reads its NBT, and inspects the root compound to decide what it is holding. A `.litematic` renamed to `.schem` still opens. A file that is not a schematic fails with a specific reason ("schem is missing a Palette compound"), never with a vague "unsupported file".
 
-### Compatibility with the launcher's preloader
+### Works on every 1.26 build
 
-The world-space renderer needs the preloader's per-frame render API. A mod whose `.so` has an *undefined, non-weak* symbol the running preloader does not export **fails to load entirely** — the launcher reports "Built for a different game build (missing symbol)" and nothing runs.
+World-space rendering on Bedrock needs a per-frame point on the render thread with the GL context current. The launcher's own render callback is tied to specific game builds, so BiteMatica does not depend on it: it hooks **`eglSwapBuffers`**, which every GLES build calls exactly once per frame and whose signature the EGL standard fixes. That makes the render seam **version-independent**, so world-space geometry works on **1.26 through 1.26.52** and beyond.
 
-BiteMatica declares that API **weak**, so:
+The camera is read from the game's own view and projection matrices (found once, then read cheaply each frame), so no per-build player accessor is needed either.
 
-- On a preloader **with** the render API: full world-space rendering.
-- On a preloader **without** it (the commit GlowberryClient currently pins): the mod **still loads and runs**, drawing the schematic through the software overlay instead. The status line says `software overlay` so the mode is never a mystery.
-
-That means one `.AntEgg` works across launcher builds, and nothing is silently broken.
+If a launcher *does* export the SDK render callback, BiteMatica uses it instead; if neither is available it falls back to a software overlay and says so in the status line. Nothing is silently broken, and the mod always loads.
 
 ### World-space rendering
 - The schematic is drawn as **real 3D geometry in the world**, not a screen-space projection — so it moves with the world as you walk, and it sits at a real position you can build toward.
@@ -74,8 +71,34 @@ That means one `.AntEgg` works across launcher builds, and nothing is silently b
 - **Adjustable opacity** (10–100%) so the build never fights the world behind it.
 - A **triangle budget** (default 1.5M, up to 4M) and a **distance cull** (default 256 blocks) so a mega-build cannot stall your frame rate; when the budget bites, the status line says so instead of silently dropping geometry.
 
+### The Litematica toolset
+
+BiteMatica implements Litematica's tool model, adapted for touch and controller:
+
+**Nine tool modes** (cycle with the `T` button, or **L1/R1** on a controller):
+
+| Mode | What it does |
+| --- | --- |
+| **Area Selection** | Set corner 1 and corner 2 at the crosshair; the selection is the region to save or fill |
+| **Schematic Placement** | Move the placement origin to the block you are looking at |
+| **Fill / Replace** | Fill the selection with the held block (creative) |
+| **Delete** | Clear the selection (creative) |
+| **Move** | Move a region from A to B |
+| **Paste** | Generate the commands that paste the schematic into the world |
+| **Grid** | Repeat the selection on a grid |
+| **Rebuild / Verify** | Scan the world against the schematic and highlight mismatches |
+| **Pick Block** | Read the schematic block under the crosshair |
+
+**Full menu system** (`N` opens it, `Tab` cycles pages), matching Litematica's layout: **Main**, **Config** (generic, visuals, colors, performance, hotkeys, info switches), **Materials**, **Placements** (rotation, mirroring, sub-region toggles, locking), **Render Layers**, **Area Editor**, **Loaded Schematics**, and **Tasks**.
+
+**Easy Place** — look at a ghost block and the mod works out which block to place and which way it should face, so stairs and the like orient correctly. It reports the decision; it does not place anything without your command.
+
+**Block targeting** — a voxel ray-cast from the camera finds the block under the crosshair, which is what every tool mode acts on.
+
+**Paste to world** — generates `/setblock` and `/fill` commands (merging runs of the same block) and writes them to `exports/paste_commands.txt`. That is the reliable placement route: the game does the placing, and nothing touches the network.
+
 ### Layer modes
-Show **all layers**, a **single layer**, or a **range** — the standard way to build a floor-by-floor structure without the upper floors hiding the one you are working on.
+Show **all layers**, a **single layer**, **all below**, **all above**, or a **range**, with step up/down — the standard way to build a floor-by-floor structure without the upper floors hiding the one you are working on.
 
 ### Verify against the world
 The feature that makes a schematic tool actually useful: **compare the schematic to the live world** and colour every block by its state.
@@ -205,7 +228,7 @@ cmake --build build/host --target bitematica_tests bitematica_world_tests
 ./build/host/bitematica_world_tests  # placement transforms, mesher, verification, translation
 ```
 
-**180 checks across the two suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
+**223 checks across the three suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
 
 The world suite covers the parts most likely to be subtly wrong and hardest to debug on a device: the placement transform (every rotation × mirror round-trips `toWorld`/`toLocal`), the mesher (a solid 3×3×3 collapses to a handful of merged quads, and interior faces are culled), placement-local frustum culling (the local→world transform is pinned against the shader's own rotation signs), verification (missing/wrong/extra counted against a fake world), the Java→Bedrock direction inversion, and the `.litematic` write→read round trip.
 
