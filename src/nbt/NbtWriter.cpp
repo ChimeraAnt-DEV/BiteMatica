@@ -164,6 +164,14 @@ Tag NbtWriter::byteTag(const std::string &name, int value) {
   return tag;
 }
 
+Tag NbtWriter::longTag(const std::string &name, int64_t value) {
+  Tag tag;
+  tag.type = TagType::Long;
+  tag.name = name;
+  tag.intValue = value;
+  return tag;
+}
+
 Tag NbtWriter::floatTag(const std::string &name, double value) {
   Tag tag;
   tag.type = TagType::Float;

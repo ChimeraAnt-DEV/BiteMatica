@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <fstream>
 
+#include "nbt/NbtReader.hpp"
 #include "nbt/NbtWriter.hpp"
 
 namespace bitematica::format {
@@ -86,6 +87,34 @@ std::string LitematicWriter::bytes(const core::Schematic &schematic, const std::
   region.children.push_back(std::move(size));
   region.children.push_back(std::move(palette));
   region.children.push_back(std::move(blockStates));
+
+  // Block entities (G5): each is raw NBT bytes captured by a reader. Re-parse it into a tag and
+  // attach its `Pos` (relative to the region) so Litematica can place the chest contents, sign
+  // text, etc. A block entity that will not re-parse is skipped, not written as garbage.
+  if (!schematic.blockEntities.empty()) {
+    Tag blockEntities = NbtWriter::list("BlockEntities", TagType::Compound);
+    for (const auto &[index, raw] : schematic.blockEntities) {
+      // The raw bytes are a full named compound; parse them back through the reader.
+      const nbt::Document parsed =
+          nbt::NbtReader::readRaw(std::vector<uint8_t>(raw.begin(), raw.end()));
+      if (!parsed.valid()) continue;
+      Tag entry = parsed.root;
+      entry.name.clear();
+      // Attach the position if the reader did not (some formats store it elsewhere).
+      if (entry.find("Pos") == nullptr && index >= 0) {
+        const int x = index % sizeX;
+        const int y = (index / sizeX) / sizeZ;
+        const int z = (index / sizeX) % sizeZ;
+        Tag pos = NbtWriter::list("Pos", TagType::Int);
+        pos.children.push_back(NbtWriter::intTag("", x));
+        pos.children.push_back(NbtWriter::intTag("", y));
+        pos.children.push_back(NbtWriter::intTag("", z));
+        entry.children.push_back(std::move(pos));
+      }
+      blockEntities.children.push_back(std::move(entry));
+    }
+    if (!blockEntities.children.empty()) region.children.push_back(std::move(blockEntities));
+  }
 
   Tag regions = NbtWriter::compound("Regions");
   regions.children.push_back(std::move(region));

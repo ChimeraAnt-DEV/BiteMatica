@@ -70,6 +70,7 @@
 #include "litematica/PlacementStore.hpp"
 #include "litematica/ToolMode.hpp"
 #include "translate/BlockStateTransform.hpp"
+#include "translate/BlockTranslation.hpp"
 #include "mesh/SectionMesher.hpp"
 #include "ui/MenuBuilder.hpp"
 #include "ui/MenuModel.hpp"
@@ -364,6 +365,13 @@ bool BiteMaticaMod::load() {
     const int merged = bitematica::render::BlockColors::loadFile(colorsPath.string());
     log.info("BiteMatica: block colour table: {} entries merged from {}", merged,
              merged > 0 ? colorsPath.string() : "(embedded default)");
+  }
+  {
+    // The Java->Bedrock translation table (G2), merged over the built-in renames.
+    const std::filesystem::path translationPath =
+        mSelf->getModDir() / "data" / "block_translation.json";
+    const int merged = bitematica::translate::BlockTranslation::loadFile(translationPath.string());
+    log.info("BiteMatica: block translation table: {} renames merged", merged);
   }
 
   const std::filesystem::path configPath = mSelf->getConfigDir() / "config.json";
