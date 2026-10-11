@@ -140,6 +140,16 @@ src/render/HudOverlay.cpp src/mod/ControllerNavigator.cpp src/mod/JsonConfig.cpp
   default `-1`). There is no runtime discovery, and a wrong slot faults the game thread. To enable
   it on a new build: confirm the slot the way the SDK's own hooks do, set it in the config, and
   watch the `BiteMatica: world source ...` log line.
+- **The menu is drawn through HUD commands and opened by a tap, not a key.** `MenuRenderer::layout`
+  returns draw commands **and** hitboxes from one pass; the touch handler walks exactly those
+  hitboxes, so a drawn row and a tappable row cannot drift. A floating icon (`layoutIcon`) is always
+  on screen so the menu is reachable without a keyboard or the launcher's Mod Menu. `handleTouch`
+  checks the menu first, so its taps are never swallowed by the toolbar underneath. Tests pin the
+  icon hitbox, that every hitbox is inside the panel, a minimum touch size, and that no two hitboxes
+  overlap.
+- **Menu pages are rebuilt on every `submitHud`** (`rebuildMenuPages`), so the menu always reflects
+  the live config and placements. A widget id that is not handled by `applyMenuConfig`/
+  `applyMenuAction` silently does nothing — add the case when adding a widget.
 - **The package must contain its `egg.json` entry point.** `pack_antegg.py` refuses to run
   when `egg.json`'s `entry_point` and `--entry` disagree; the loader would reject it later.
 

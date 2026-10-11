@@ -43,7 +43,8 @@ set(BITEMATICA_CORE_SOURCES
     src/litematica/PasteJob.cpp
     src/litematica/EasyPlace.cpp
     src/render/GameCamera.cpp
-    src/ui/MenuBuilder.cpp)
+    src/ui/MenuBuilder.cpp
+    src/ui/MenuRenderer.cpp)
 
 add_library(bitematica_core STATIC ${BITEMATICA_CORE_SOURCES})
 target_include_directories(bitematica_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
