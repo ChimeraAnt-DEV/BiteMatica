@@ -15,6 +15,7 @@ using core::Schematic;
 /// One cell of a greedy-meshing slab: the block's colour and whether the face is exposed.
 struct MaskCell {
   uint32_t color{};
+  uint8_t verdict{};
   bool filled{};
 };
 
@@ -92,8 +93,8 @@ struct MirrorTransform {
 /// `glCullFace(GL_BACK)` works. When a mirror is active the corners are reflected and the winding is
 /// reversed, so the quad still faces outward after the reflection.
 void emitQuad(SectionMesh &mesh, const FaceDir &face, float planeW, int aStart, int bStart,
-              int aLen, int bLen, uint32_t color, float originX, float originY, float originZ,
-              const MirrorTransform &mirror) {
+              int aLen, int bLen, uint32_t color, uint8_t verdict, float originX, float originY,
+              float originZ, const MirrorTransform &mirror) {
   // (a, b) corners of the rectangle.
   const float ab[4][2] = {
       {static_cast<float>(aStart), static_cast<float>(bStart)},
@@ -119,6 +120,7 @@ void emitQuad(SectionMesh &mesh, const FaceDir &face, float planeW, int aStart, 
     vertex.z = xyz[2] - originZ;
     vertex.color = shaded;
     vertex.face = face.face;
+    vertex.verdict = verdict;
     mesh.vertices.push_back(vertex);
   }
   // A reflection flips the winding; emit the reverse order so the face still culls correctly.
@@ -136,8 +138,8 @@ void emitQuad(SectionMesh &mesh, const FaceDir &face, float planeW, int aStart, 
 /// Used for non-cube block shapes (C3). A shape's boxes are independent of their neighbours, so the
 /// exposed-face cull does not apply — the boxes are small and the extra triangles are bounded by the
 /// shape table. Each face gets the directional shading the greedy path uses.
-void emitBox(SectionMesh &mesh, const core::ShapeBox &box, uint32_t color, float originX,
-             float originY, float originZ, const MirrorTransform &mirror) {
+void emitBox(SectionMesh &mesh, const core::ShapeBox &box, uint32_t color, uint8_t verdict,
+             float originX, float originY, float originZ, const MirrorTransform &mirror) {
   // (axis, positive) for the six faces, matching the shading tags in `kFaces`.
   struct FaceDef {
     int n;
@@ -190,6 +192,7 @@ void emitBox(SectionMesh &mesh, const core::ShapeBox &box, uint32_t color, float
       vertex.z = xyz[2] - originZ;
       vertex.color = shaded;
       vertex.face = f.faceTag;
+      vertex.verdict = verdict;
       mesh.vertices.push_back(vertex);
     }
     // A mirror reflects the box (min/max swapped above), which flips the winding; reverse it so the
@@ -208,7 +211,8 @@ void emitBox(SectionMesh &mesh, const core::ShapeBox &box, uint32_t color, float
 
 SectionMesh SectionMesher::buildSection(const Schematic &schematic,
                                         const world::Placement &placement, int sectionX,
-                                        int sectionY, int sectionZ, int layerMin, int layerMax) {
+                                        int sectionY, int sectionZ, int layerMin, int layerMax,
+                                        const std::vector<uint8_t> *statuses) {
   // The placement's rotation is applied by the shader at draw time, but its **mirror is not**: it is
   // baked into the local coordinates here, because a reflection reverses triangle winding and the
   // shader has no way to express that. See `MirrorTransform`.
@@ -225,6 +229,12 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
   const int sizeZ = schematic.sizeZ();
   if (sizeX <= 0 || sizeY <= 0 || sizeZ <= 0) return mesh;
 
+  auto verdictAt = [&](int x, int y, int z) -> uint8_t {
+    if (statuses == nullptr) return 0; // Correct when verification has not run
+    const size_t index = static_cast<size_t>(schematic.indexOf(x, y, z));
+    return index < statuses->size() ? (*statuses)[index] : 0;
+  };
+
   MirrorTransform mirror;
   mirror.mirrorX = placement.mirror == world::Mirror::X;
   mirror.mirrorZ = placement.mirror == world::Mirror::Z;
@@ -238,6 +248,7 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
   struct ShapeBlock {
     int x, y, z;
     uint32_t color;
+    uint8_t verdict;
   };
   std::vector<ShapeBlock> shapeBlocks;
 
@@ -257,7 +268,8 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
         const core::BlockState &block = schematic.palette.at(state);
         if (core::BlockShape::neverRenders(block)) continue;
         if (core::BlockShape::isCube(block)) continue;
-        shapeBlocks.push_back({x, y, z, render::BlockColors::forBlock(block.name).argb});
+        shapeBlocks.push_back({x, y, z, render::BlockColors::forBlock(block.name).argb,
+                               verdictAt(x, y, z)});
       }
     }
   }
@@ -299,6 +311,7 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
           MaskCell &cell = mask[static_cast<size_t>(a) + static_cast<size_t>(b) * aSize];
           cell.filled = true;
           cell.color = render::BlockColors::forBlock(schematic.palette.at(state).name).argb;
+          cell.verdict = verdictAt(x, y, z);
         }
       }
 
@@ -313,7 +326,7 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
           while (a + width < aSize) {
             const MaskCell &next =
                 mask[static_cast<size_t>(a + width) + static_cast<size_t>(b) * aSize];
-            if (!next.filled || next.color != cell.color) break;
+            if (!next.filled || next.color != cell.color || next.verdict != cell.verdict) break;
             ++width;
           }
           int height = 1;
@@ -322,7 +335,7 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
             for (int k = 0; k < width; ++k) {
               const MaskCell &next =
                   mask[static_cast<size_t>(a + k) + static_cast<size_t>(b + height) * aSize];
-              if (!next.filled || next.color != cell.color) {
+              if (!next.filled || next.color != cell.color || next.verdict != cell.verdict) {
                 growing = false;
                 break;
               }
@@ -331,8 +344,8 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
           }
 
           const float planeW = static_cast<float>(w) + (face.positive ? 1.0f : 0.0f);
-          emitQuad(mesh, face, planeW, a, b, width, height, cell.color, mesh.originX,
-                   mesh.originY, mesh.originZ, mirror);
+          emitQuad(mesh, face, planeW, a, b, width, height, cell.color, cell.verdict,
+                   mesh.originX, mesh.originY, mesh.originZ, mirror);
 
           for (int dv = 0; dv < height; ++dv) {
             for (int du = 0; du < width; ++du) {
@@ -354,7 +367,7 @@ SectionMesh SectionMesher::buildSection(const Schematic &schematic,
                      box.minZ + static_cast<float>(block.z),
                      box.maxX + static_cast<float>(block.x), box.maxY + static_cast<float>(block.y),
                      box.maxZ + static_cast<float>(block.z)},
-              block.color, mesh.originX, mesh.originY, mesh.originZ, mirror);
+              block.color, block.verdict, mesh.originX, mesh.originY, mesh.originZ, mirror);
     }
   }
 
@@ -475,7 +488,8 @@ SectionMesher::OutlineResult SectionMesher::buildOutlines(const Schematic &schem
 
 SectionMesher::Result SectionMesher::build(const Schematic &schematic,
                                            const world::Placement &placement, int layerMin,
-                                           int layerMax, long long maxTriangles) {
+                                           int layerMax, long long maxTriangles,
+                                           const std::vector<uint8_t> *statuses) {
   Result result;
   if (schematic.empty()) return result;
 
@@ -487,7 +501,8 @@ SectionMesher::Result SectionMesher::build(const Schematic &schematic,
   for (int sz = 0; sz < sectionsZ; ++sz) {
     for (int sy = 0; sy < sectionsY; ++sy) {
       for (int sx = 0; sx < sectionsX; ++sx) {
-        SectionMesh section = buildSection(schematic, placement, sx, sy, sz, layerMin, layerMax);
+        SectionMesh section =
+            buildSection(schematic, placement, sx, sy, sz, layerMin, layerMax, statuses);
         if (section.empty()) continue;
         triangles += static_cast<long long>(section.triangles.size());
         if (triangles > maxTriangles) {

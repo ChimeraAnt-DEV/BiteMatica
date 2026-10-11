@@ -19,7 +19,13 @@ struct MeshVertex {
   uint32_t color{};
   /// 0 = top face, 1 = side, 2 = bottom. Used by the shader for a little directional shading.
   uint8_t face{};
-  uint8_t pad[3]{};
+  /// The verification verdict of the block this vertex belongs to (F6), matching
+  /// `world::BlockStatus` (0 Correct, 1 Missing, 2 WrongBlock, 3 WrongState, 4 Extra, 5 Unknown).
+  /// When verification has not run every vertex is 0 (Correct), so the mismatch modes degrade to
+  /// "draw everything". A per-vertex verdict is what lets the shader colour and hide blocks by state
+  /// without a remesh when the display mode changes.
+  uint8_t verdict{};
+  uint8_t pad[2]{};
 };
 
 /// A triangle index triplet.
@@ -72,14 +78,20 @@ public:
   /// @param placement where the schematic sits in the world (origin/rotation/mirror)
   /// @param layerMin,layerMax inclusive Y range in schematic-local space to mesh (layer modes)
   /// @param maxTriangles triangle budget; meshing stops and `truncated` is set when exceeded
+  /// @param statuses per-block verification verdicts (F6), indexed like `Schematic::blocks`. When
+  ///        empty, every vertex is tagged Correct, so the mismatch modes degrade to "draw
+  ///        everything". This is how the mismatch colours reach the shader without a remesh when the
+  ///        display mode changes — only a new verification changes the mesh.
   static Result build(const core::Schematic &schematic, const world::Placement &placement,
-                      int layerMin, int layerMax, long long maxTriangles = 1500000);
+                      int layerMin, int layerMax, long long maxTriangles = 1500000,
+                      const std::vector<uint8_t> *statuses = nullptr);
 
   /// Builds a single section's mesh. Exposed so a section can be rebuilt on an edit without
   /// re-meshing the whole schematic.
   static SectionMesh buildSection(const core::Schematic &schematic,
                                   const world::Placement &placement, int sectionX, int sectionY,
-                                  int sectionZ, int layerMin, int layerMax);
+                                  int sectionZ, int layerMin, int layerMax,
+                                  const std::vector<uint8_t> *statuses = nullptr);
 
   /// One section's block-edge outline: line-segment vertices plus index pairs (two per segment).
   struct SectionOutline {

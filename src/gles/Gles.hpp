@@ -118,8 +118,10 @@ struct Functions {
   void *GetUniformLocation = nullptr;
   void *UniformMatrix4fv = nullptr;
   void *Uniform1f = nullptr;
+  void *Uniform1i = nullptr;
   void *Uniform3f = nullptr;
   void *Uniform4f = nullptr;
+  void *Uniform4fv = nullptr;
   void *ActiveTexture = nullptr;
   void *BindTexture = nullptr;
   void *DrawElements = nullptr;
