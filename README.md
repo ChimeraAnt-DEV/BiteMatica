@@ -143,7 +143,7 @@ Output:
 dist/BiteMatica-1.0.0.antegg
 ```
 
-`build.sh` discovers the NDK from `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` / `ANDROID_HOME`, or takes `--ndk <path>`. If the preloader SDK is not already under `third_party/preloader-android`, it clones the pinned tag automatically, so the build has no hidden machine-local dependency.
+`build.sh` discovers the NDK from `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` / `ANDROID_HOME`, or takes `--ndk <path>`. If the preloader SDK is not already under `third_party/preloader-android`, it clones the SDK's `main` branch automatically, so the build has no hidden machine-local dependency. Set `PRELOADER_REF` to pin a branch or commit.
 
 ### The host test suite
 The format readers, palette unpacking, the mesh projector, the toolbar geometry, the controller grid, the config round-trip and the structure export are all pure C++ with **no Android dependency**, so they are built and run on the host:
