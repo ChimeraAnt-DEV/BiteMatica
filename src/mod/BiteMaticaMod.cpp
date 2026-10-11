@@ -77,6 +77,7 @@
 #include "mod/JsonConfig.hpp"
 #include "mod/LocalPlayerFeed.hpp"
 #include "mod/SchematicLibrary.hpp"
+#include "render/BlockColors.hpp"
 #include "render/GameCamera.hpp"
 #include "render/HudOverlay.hpp"
 #include "render/MathTypes.hpp"
@@ -343,6 +344,16 @@ bool BiteMaticaMod::load() {
   std::error_code ec;
   std::filesystem::create_directories(mSelf->getConfigDir(), ec);
   std::filesystem::create_directories(mSelf->getDataDir() / "exports", ec);
+
+  // Load the block-colour table from the package (`data/block_colors.json`), overlaying the embedded
+  // default. A missing file is not an error: the default table is always usable. The count is logged
+  // so a package that forgot the file is visible.
+  {
+    const std::filesystem::path colorsPath = mSelf->getModDir() / "data" / "block_colors.json";
+    const int merged = bitematica::render::BlockColors::loadFile(colorsPath.string());
+    log.info("BiteMatica: block colour table: {} entries merged from {}", merged,
+             merged > 0 ? colorsPath.string() : "(embedded default)");
+  }
 
   const std::filesystem::path configPath = mSelf->getConfigDir() / "config.json";
   std::string text;
@@ -1046,10 +1057,13 @@ void BiteMaticaMod::runVerification() {
   mVerification = bitematica::world::Verifier::verify(schematic(), mPlacement, mWorldSource,
                                                       layerMin, layerMax, mConfig.verifyExtras);
   mLiveMaterials = bitematica::core::LiveMaterials::build(schematic(), mVerification);
-  char buffer[160];
-  std::snprintf(buffer, sizeof(buffer), "Verified: %lld correct, %lld missing, %lld wrong, %lld extra",
-                mVerification.correct, mVerification.missing, mVerification.wrong,
-                mVerification.extra);
+  char buffer[200];
+  std::snprintf(buffer, sizeof(buffer),
+                "Verified: %lld correct, %lld missing, %lld wrong block, %lld wrong state, "
+                "%lld extra, %lld unknown (%d%%)",
+                mVerification.correct, mVerification.missing, mVerification.wrongBlock,
+                mVerification.wrongState, mVerification.extra, mVerification.unknown,
+                mVerification.percentComplete());
   setStatus(buffer);
 }
 

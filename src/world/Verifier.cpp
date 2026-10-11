@@ -3,27 +3,50 @@
 namespace bitematica::world {
 namespace {
 
-/// Compares two block states for "is this the block the schematic wants".
+/// Compares two block states, distinguishing "wrong block" from "wrong state".
 ///
-/// The comparison ignores block-state properties by default: Bedrock's state names for the same
-/// visual block differ from Java's (see the translation table), so requiring an exact state match
-/// would flag nearly every stair and slab as `Wrong`. Type-level matching is the honest default;
-/// state-level matching is available where the translation is confident.
-bool sameBlock(const core::BlockState &wanted, const core::BlockState &found) {
-  return wanted.baseName() == found.baseName();
+/// The block *type* is the primary check. When the types match, the states are compared too, but
+/// only over the keys the two sides share: Bedrock's state names for the same visual block differ
+/// from Java's (`facing` -> `weirdo_direction`, `half` -> `upside_down_bit`), and the translation
+/// table has already normalised what it can. Comparing the shared keys catches the case that matters
+/// — a stair facing the wrong way — without flagging every slab whose extra Bedrock-only bits differ.
+///
+/// The distinction is what gives the verifier its `WrongState` verdict, which the mismatch palette
+/// colours differently from a `WrongBlock`.
+enum class StateMatch { Same, WrongState, WrongBlock };
+
+StateMatch compareState(const core::BlockState &wanted, const core::BlockState &found) {
+  if (wanted.baseName() != found.baseName()) return StateMatch::WrongBlock;
+  for (const auto &[key, value] : wanted.states) {
+    for (const auto &[foundKey, foundValue] : found.states) {
+      if (foundKey == key && foundValue != value) return StateMatch::WrongState;
+    }
+  }
+  return StateMatch::Same;
 }
 
 } // namespace
 
-uint32_t Verifier::colorFor(BlockStatus status) {
-  switch (status) {
-    case BlockStatus::Correct: return 0x8000C060u;  // translucent green
-    case BlockStatus::Missing: return 0xC0FF4040u;  // red, needs placing
-    case BlockStatus::Wrong: return 0xC0FFA030u;    // amber, wrong block
-    case BlockStatus::Extra: return 0xC04080FFu;    // blue, should be removed
-    case BlockStatus::Unknown: return 0x40808080u;  // dim grey, unreadable
+MismatchPalette MismatchPalette::preset(int index) {
+  switch (index) {
+    case 1: return colourBlind();
+    case 2: return highContrast();
+    case 0:
+    default: return litematica();
   }
-  return 0x40808080u;
+}
+
+uint32_t Verifier::colorFor(BlockStatus status) {
+  const MismatchPalette p = MismatchPalette::litematica();
+  switch (status) {
+    case BlockStatus::Correct: return p.correct;
+    case BlockStatus::Missing: return p.missing;
+    case BlockStatus::WrongBlock: return p.wrongBlock;
+    case BlockStatus::WrongState: return p.wrongState;
+    case BlockStatus::Extra: return p.extra;
+    case BlockStatus::Unknown: return p.unknown;
+  }
+  return p.unknown;
 }
 
 VerifyResult Verifier::verify(const core::Schematic &schematic, const Placement &placement,
@@ -59,15 +82,19 @@ VerifyResult Verifier::verify(const core::Schematic &schematic, const Placement 
         core::BlockState found;
         BlockStatus status;
         if (!source.readBlock(world, found)) {
+          // An unreadable block (unloaded chunk, no source) is Unknown — never Missing. Treating it
+          // as missing would tell the player to build a wall that already exists.
           status = BlockStatus::Unknown;
         } else if (wantsAir) {
           status = found.isAir() ? BlockStatus::Correct : BlockStatus::Extra;
         } else if (found.isAir()) {
           status = BlockStatus::Missing;
-        } else if (sameBlock(wanted, found)) {
-          status = BlockStatus::Correct;
         } else {
-          status = BlockStatus::Wrong;
+          switch (compareState(wanted, found)) {
+            case StateMatch::Same: status = BlockStatus::Correct; break;
+            case StateMatch::WrongState: status = BlockStatus::WrongState; break;
+            case StateMatch::WrongBlock: status = BlockStatus::WrongBlock; break;
+          }
         }
 
         const size_t index = static_cast<size_t>(schematic.indexOf(x, y, z));
@@ -75,7 +102,8 @@ VerifyResult Verifier::verify(const core::Schematic &schematic, const Placement 
         switch (status) {
           case BlockStatus::Correct: ++result.correct; break;
           case BlockStatus::Missing: ++result.missing; break;
-          case BlockStatus::Wrong: ++result.wrong; break;
+          case BlockStatus::WrongBlock: ++result.wrongBlock; break;
+          case BlockStatus::WrongState: ++result.wrongState; break;
           case BlockStatus::Extra: ++result.extra; break;
           case BlockStatus::Unknown: ++result.unknown; break;
         }
