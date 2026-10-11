@@ -1,0 +1,11 @@
+{
+  "type": "preload-native",
+  "name": "BiteMatica",
+  "author": "ChimeraAnt",
+  "version": "1.3.0",
+  "entry": "bin/libbitematica.so",
+  "icon": "icon.png",
+  "minecraft_versions": [],
+  "overwrite_files": [],
+  "overwrite_folders": []
+}
