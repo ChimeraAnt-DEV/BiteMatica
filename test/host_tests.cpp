@@ -378,6 +378,17 @@ void testConfigNormalize() {
   check(config.opacity == 10, "opacity clamped to the minimum");
   check(config.maxRenderBlocks == 500, "render cap clamped to the minimum");
   check(config.toolbarX == 0, "negative anchor clamped to zero");
+
+  // K6/K1: the memory cap and upload budget are clamped.
+  bitematica::mod::Config perf;
+  perf.maxSchematicBlocks = 10;
+  perf.uploadSectionsPerFrame = 0;
+  perf.normalize();
+  check(perf.maxSchematicBlocks >= 100000, "the memory cap has a floor");
+  check(perf.uploadSectionsPerFrame >= 1, "the upload budget has a floor of 1");
+  perf.uploadSectionsPerFrame = 999;
+  perf.normalize();
+  check(perf.uploadSectionsPerFrame <= 64, "the upload budget has a ceiling");
 }
 
 void testConfigRoundTrip() {

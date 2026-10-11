@@ -10,6 +10,8 @@
   "maxRenderBlocks": 60000,
   "maxTriangles": 1500000,
   "renderDistance": 256,
+  "maxSchematicBlocks": 32000000,
+  "uploadSectionsPerFrame": 2,
   "layerMode": 0,
   "layerSingle": 0,
   "layerMin": 0,

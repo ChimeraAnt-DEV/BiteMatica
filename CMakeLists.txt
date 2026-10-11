@@ -176,6 +176,11 @@ if(NOT ANDROID)
       BITEMATICA_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   add_test(NAME bitematica_render_tests COMMAND bitematica_render_tests)
 
+  # A benchmark target (K7): prints mesher and verifier timings so a performance regression is
+  # visible. Not a test; it is run by hand.
+  add_executable(bitematica_bench test/bench.cpp)
+  target_link_libraries(bitematica_bench PRIVATE bitematica_core)
+
   # A syntax-only check of the Android glue against stubbed Android/fmt headers. It compiles the
   # preloader-dependent translation units so a type error in the GLES renderer or the mod glue is
   # caught on a host, without an NDK. No binary is produced.
