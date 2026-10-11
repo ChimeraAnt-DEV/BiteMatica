@@ -133,6 +133,18 @@ src/render/HudOverlay.cpp src/mod/ControllerNavigator.cpp src/mod/JsonConfig.cpp
   separately (`render::computePlacementCull`). Passing `viewProjection * localToWorld` as `uMvp`
   transforms every vertex twice — `testPlacementCullMvpExcludesPlacementTransform` fails if that
   creeps back in.
+- **The camera comes from `LocalPlayerFeed`, not a matrix scan.** It hooks `ClientInstance`'s
+  local-player slot 31 **by RTTI name** and reads `Actor+0x230` (position) / `+0x238` (yaw,pitch),
+  the same offsets the launcher's own feed uses; they are shared by 1.26.33 / 1.26.50 / 1.26.51.
+  `buildLocalCamera` turns that into a view+projection. The old `GameCamera` module-scan is kept for
+  the SDK-matrix path but is no longer the camera source. Do not reintroduce a scan as the primary
+  path: it is slow and speculative, and the accessor hook is proven.
+- **The EGL hook install must be retried, not latched.** The mod enables before the game has
+  necessarily mapped a GLES library, so `EglFrameSource::install()` returns false early and
+  `retryRenderSeam()` is called from `enable` and from every touch/key event. A failed install is
+  deliberately not latched.
+- **Failures are on screen.** `refreshStatusLine` prints the render seam, `LocalPlayerFeed::diagnostic()`
+  and the drawn/no-camera frame counters. When something does not appear, read that line first.
 - **The SDK's camera matrix is only trusted after `looksWorldSpace`.** The SDK resolves it by a
   probe, so its coordinate space is not guaranteed; `looksWorldSpace` rejects a camera-relative
   matrix and the caller then uses the first-person fallback.

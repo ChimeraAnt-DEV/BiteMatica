@@ -21,7 +21,17 @@ using FrameCallback = std::function<void()>;
 class EglFrameSource {
 public:
   /// Installs the `eglSwapBuffers` hook. Idempotent. Returns true when the detour is live.
+  ///
+  /// May fail if the game has not loaded a GLES library yet (the mod enables early, the context
+  /// comes later). `tryInstall` is the same call and exists so a caller can retry it; a failed
+  /// install is not latched, so a later attempt can still succeed once EGL is mapped.
   static bool install();
+
+  /// Retries installation. Returns true once the hook is live.
+  static bool tryInstall();
+
+  /// True when a hook attempt has been made and failed because no EGL library was found yet.
+  static bool waitingForEgl();
 
   /// True once the hook has observed a frame.
   static bool live();

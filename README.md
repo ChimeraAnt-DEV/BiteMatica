@@ -53,11 +53,13 @@ Detection is by **content first**, not the file extension: BiteMatica decompress
 
 ### Works on every 1.26 build
 
-World-space rendering on Bedrock needs a per-frame point on the render thread with the GL context current. The launcher's own render callback is tied to specific game builds, so BiteMatica does not depend on it: it hooks **`eglSwapBuffers`**, which every GLES build calls exactly once per frame and whose signature the EGL standard fixes. That makes the render seam **version-independent**, so world-space geometry works on **1.26 through 1.26.52** and beyond.
+Two things have to hold for world-space rendering, and both are grounded in what the game actually does:
 
-The camera is read from the game's own view and projection matrices (found once, then read cheaply each frame), so no per-build player accessor is needed either.
+**A per-frame point on the render thread.** BiteMatica hooks **`eglSwapBuffers`**, which every GLES build calls exactly once per frame with the context current, and whose signature the EGL standard fixes. If the game has not mapped a GLES library when the mod enables, the hook is retried on the next input, so it installs as soon as the game is live.
 
-If a launcher *does* export the SDK render callback, BiteMatica uses it instead; if neither is available it falls back to a software overlay and says so in the status line. Nothing is silently broken, and the mod always loads.
+**The camera.** It is built from the **local player feed**, hooked on `ClientInstance`'s own local-player accessor — resolved by RTTI name, with the position and rotation read from the fields at `Actor+0x230` / `+0x238`. Those offsets are shared by **1.26.33, 1.26.50 and 1.26.51**, which is exactly the range this targets. It is the same mechanism the launcher uses for its own in-world features, so it is proven rather than speculative.
+
+The status line reports the live state — which seam is active, whether the camera feed is live, and how many frames have drawn — so a failure is visible on screen instead of silent.
 
 ### World-space rendering
 - The schematic is drawn as **real 3D geometry in the world**, not a screen-space projection — so it moves with the world as you walk, and it sits at a real position you can build toward.
@@ -234,7 +236,7 @@ cmake --build build/host --target bitematica_tests bitematica_world_tests
 ./build/host/bitematica_world_tests  # placement transforms, mesher, verification, translation
 ```
 
-**238 checks across the three suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
+**242 checks across the three suites.** They read **real, generated schematic files** — gzip NBT, packed long arrays, multi-region files with per-region palettes, and negative-size regions — through the production readers, not mocks. `test/make_fixtures.py` writes them, and its encoders are shared with the demo-schematic generator, so there is one definition of each wire format.
 
 The world suite covers the parts most likely to be subtly wrong and hardest to debug on a device: the placement transform (every rotation × mirror round-trips `toWorld`/`toLocal`), the mesher (a solid 3×3×3 collapses to a handful of merged quads, and interior faces are culled), placement-local frustum culling (the local→world transform is pinned against the shader's own rotation signs), verification (missing/wrong/extra counted against a fake world), the Java→Bedrock direction inversion, and the `.litematic` write→read round trip.
 
