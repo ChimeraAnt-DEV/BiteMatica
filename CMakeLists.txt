@@ -95,9 +95,14 @@ if(ANDROID)
         -Wall -Wextra -Wpedantic -fvisibility=hidden -fvisibility-inlines-hidden>)
   set_target_properties(bitematica PROPERTIES OUTPUT_NAME "bitematica")
 
-  # The preloader exports the SDK symbols at load time; linking against it is only
-  # needed when it is built in the same tree. Otherwise the loader resolves them.
-  option(BITEMATICA_LINK_PRELOADER "Build and link the local preloader target" OFF)
+  # The SDK symbols (`pl::mod`, `pl::modmenu`, `pl::input`) come from the preloader.
+  # Build it as a subproject and link it: the mod's NEEDED entry then names
+  # libpreloader.so, which the loader has already mapped when it injects the mod, so
+  # the symbols bind to the running preloader. This is the same path the SDK's own
+  # full-cpp-mod example uses. `--unresolved-symbols=ignore-all` is only a fallback for
+  # the (unsupported) case of building the mod without a preloader checkout at all.
+  option(BITEMATICA_LINK_PRELOADER
+         "Build and link the local preloader-android target" ON)
   if(BITEMATICA_LINK_PRELOADER AND NOT TARGET preloader)
     add_subdirectory("${PRELOADER_ANDROID_ROOT}"
                      "${CMAKE_BINARY_DIR}/_preloader_android")
