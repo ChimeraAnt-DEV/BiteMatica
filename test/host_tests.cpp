@@ -84,6 +84,27 @@ void testNbtRejectsGarbage() {
   const std::vector<uint8_t> garbage = {0xff, 0x00, 0x12, 0x34, 0x56};
   const bitematica::nbt::Document document = bitematica::nbt::NbtReader::readFile(garbage);
   check(!document.valid(), "garbage is rejected, not partially decoded");
+
+  // L4: a truncated document (a valid header then a cut-off payload) is rejected, not half-read.
+  const std::vector<uint8_t> truncated = {0x0a, 0x00, 0x00, 0x03, 0x00, 0x01};
+  check(!bitematica::nbt::NbtReader::readFile(truncated).valid(),
+        "a truncated document is rejected");
+
+  // L4: a deeply nested compound must fail with the depth limit, not overflow the stack.
+  std::vector<uint8_t> deep;
+  const int depth = 600;
+  for (int i = 0; i < depth; ++i) {
+    deep.push_back(0x0a); // TAG_Compound
+    deep.push_back(0x00);
+    deep.push_back(0x00); // empty name
+  }
+  deep.push_back(0x00); // the innermost TAG_End
+  // Close each compound with its own TAG_End.
+  for (int i = 0; i < depth; ++i) deep.push_back(0x00);
+  const bitematica::nbt::Document deepDoc = bitematica::nbt::NbtReader::readFile(deep);
+  check(!deepDoc.valid(), "a too-deeply-nested document is rejected");
+  check(deepDoc.error.find("deep") != std::string::npos,
+        "the depth rejection names the reason: " + deepDoc.error);
 }
 
 // --- format readers -----------------------------------------------------------------
@@ -391,6 +412,20 @@ void testConfigNormalize() {
   check(perf.uploadSectionsPerFrame <= 64, "the upload budget has a ceiling");
 }
 
+/// L8: an older config is upgraded to the current version and a fresh one is left alone.
+void testConfigMigration() {
+  std::printf("testConfigMigration\n");
+  bitematica::mod::Config old;
+  old.version = 1;
+  old.opacity = 77;
+  check(old.migrate(), "a v1 config is migrated");
+  check(old.version == bitematica::mod::Config::kCurrentVersion, "the version is bumped");
+  check(old.opacity == 77, "a carried-over field keeps its value");
+
+  bitematica::mod::Config fresh;
+  check(!fresh.migrate(), "a current config is not migrated");
+}
+
 void testConfigRoundTrip() {
   std::printf("testConfigRoundTrip\n");
   bitematica::mod::Config original;
@@ -490,6 +525,7 @@ int main() {
   testChromeCommands();
   testChromeNeverDrawsSchematicGeometry();
   testConfigNormalize();
+  testConfigMigration();
   testConfigRoundTrip();
   testStructureExportRoundTrip();
   testLibraryScan();

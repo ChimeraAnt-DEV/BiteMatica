@@ -393,6 +393,13 @@ bool BiteMaticaMod::load() {
     log.warn("config could not be read ({}); using defaults", error);
     mConfig = Config{};
   }
+  // L8: upgrade an older config and keep the original as a backup before re-saving it.
+  if (mConfig.migrate() && !text.empty()) {
+    std::error_code backupEc;
+    std::filesystem::copy_file(configPath, configPath.string() + ".v1.bak",
+                               std::filesystem::copy_options::overwrite_existing, backupEc);
+    log.info("config migrated to v{}; backup written", Config::kCurrentVersion);
+  }
   mConfig.normalize();
 
   scanLibrary();
