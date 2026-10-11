@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "core/BlockState.hpp"
+#include "core/BlockShape.hpp"
 
 namespace bitematica::translate {
 
@@ -34,6 +35,36 @@ public:
 
   /// A short description of what was translated, for the load diagnostics panel.
   static std::string describe(const core::BlockState &java, const core::BlockState &bedrock);
+
+  /// True when a block id has neither a rename rule nor a state rule and is not a known
+  /// pass-through id. Such a block is drawn as a distinctive placeholder (G4) and listed under
+  /// "Unmapped" rather than silently treated as the right block.
+  static bool isUnmapped(const std::string &javaName);
+
+  /// Merges a `data/block_translation.json` table over the built-in renames (G2). The JSON is
+  /// `{ "blocks": { "minecraft:oak_planks": "minecraft:planks", ... } }`. Returns the number
+  /// merged. A malformed entry is skipped, not fatal.
+  static int loadJson(const std::string &json);
+  /// Loads a file if present; a missing file is not an error.
+  static int loadFile(const std::string &path);
+
+  /// The distinct unmapped ids seen since the last `clearUnmapped()`, for the status line and log.
+  static std::vector<std::string> unmappedBlocks();
+  static void clearUnmapped();
+
+  /// The placeholder block drawn for an unmapped id (G4): a distinctive magenta cube.
+  static core::BlockState placeholderFor(const std::string &javaName);
+
+  /// The `block_version` constant for the structure writer (G7), and the highest known-good
+  /// version. A game version newer than the table triggers a warning.
+  static constexpr int kBlockVersion = 18163713;
+  static constexpr const char *kKnownGoodVersions = "1.26.33,1.26.50,1.26.51";
+  /// True when the running game version is newer than the known-good table.
+  static bool isVersionNewerThanTable(const std::string &runningVersion);
+
+private:
+  /// Records an id in the unmapped registry (capped, de-duplicated).
+  static void recordUnmapped(const std::string &id);
 };
 
 } // namespace bitematica::translate

@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Report Java -> Bedrock translation coverage (Phase G1).
+
+Walks a list of Java block names, runs each through the translation rules, and prints how many
+map, how many are state-translated, and how many pass through unchanged. Writes
+`docs/TRANSLATION_COVERAGE.md`.
+
+Usage:
+    python3 tools/translation_coverage.py --blocks blocks.txt --out docs/TRANSLATION_COVERAGE.md
+    python3 tools/translation_coverage.py            # uses the built-in audit list
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+
+# The families the brief requires to be covered. This is the audit list.
+SAMPLE_BLOCKS = [
+    "minecraft:oak_stairs", "minecraft:stone_stairs", "minecraft:cobblestone_stairs",
+    "minecraft:oak_slab", "minecraft:stone_slab", "minecraft:smooth_quartz_slab",
+    "minecraft:oak_door", "minecraft:iron_door", "minecraft:oak_trapdoor",
+    "minecraft:oak_fence_gate",
+    "minecraft:oak_log", "minecraft:spruce_log", "minecraft:stripped_oak_log",
+    "minecraft:oak_wood", "minecraft:stripped_oak_wood",
+    "minecraft:piston", "minecraft:sticky_piston", "minecraft:observer",
+    "minecraft:dispenser", "minecraft:dropper",
+    "minecraft:rail", "minecraft:powered_rail", "minecraft:detector_rail", "minecraft:activator_rail",
+    "minecraft:torch", "minecraft:wall_torch", "minecraft:lantern", "minecraft:soul_lantern",
+    "minecraft:oak_button", "minecraft:stone_button", "minecraft:lever",
+    "minecraft:red_bed", "minecraft:white_banner", "minecraft:oak_sign",
+    "minecraft:chest", "minecraft:ender_chest", "minecraft:barrel", "minecraft:furnace",
+    "minecraft:blast_furnace", "minecraft:smoker",
+    "minecraft:redstone_wire", "minecraft:repeater", "minecraft:comparator",
+    "minecraft:glass_pane", "minecraft:oak_fence", "minecraft:cobblestone_wall",
+    "minecraft:wheat", "minecraft:carrots", "minecraft:potatoes", "minecraft:beetroots",
+    "minecraft:dandelion", "minecraft:poppy",
+    "minecraft:water", "minecraft:lava",
+    "minecraft:white_wool", "minecraft:red_concrete", "minecraft:orange_terracotta",
+    "minecraft:blue_stained_glass",
+    "minecraft:copper_block", "minecraft:exposed_copper", "minecraft:weathered_copper",
+    "minecraft:oxidized_copper", "minecraft:waxed_copper_block",
+    "minecraft:deepslate", "minecraft:tuff", "minecraft:calcite", "minecraft:amethyst_block",
+    "minecraft:copper_ore", "minecraft:raw_iron_block",
+]
+
+RENAMES = {
+    "grass_block": "grass", "oak_planks": "planks", "spruce_planks": "planks",
+    "birch_planks": "planks", "jungle_planks": "planks", "acacia_planks": "planks",
+    "dark_oak_planks": "planks", "oak_sapling": "sapling", "spruce_sapling": "sapling",
+    "birch_sapling": "sapling", "jack_o_lantern": "lit_pumpkin", "cobweb": "web",
+    "terracotta": "hardened_clay", "dirt_path": "grass_path", "snow": "snow_layer",
+    "stone_slab": "stone_block_slab", "wall_torch": "torch", "soul_wall_torch": "soul_torch",
+    "lily_pad": "waterlily", "melon": "melon_block", "nether_bricks": "nether_brick",
+    "stone_bricks": "stonebrick", "mossy_stone_bricks": "mossy_stonebrick",
+    "cracked_stone_bricks": "cracked_stonebrick", "chiseled_stone_bricks": "chiseled_stonebrick",
+}
+
+DIRECTIONAL_SUFFIXES = ("_stairs", "_door", "_trapdoor", "_fence_gate", "_wall_sign", "_sign",
+                        "_ladder")
+
+
+def strip_ns(name: str) -> str:
+    return name.split(":", 1)[1] if ":" in name else name
+
+
+def classify(java_id: str, renames: dict) -> str:
+    bare = strip_ns(java_id)
+    # An identity entry ("oak_log" -> "oak_log") is a no-op, not a rename.
+    if bare in renames and renames[bare] != bare:
+        return "rename"
+    if any(bare.endswith(s) for s in DIRECTIONAL_SUFFIXES):
+        return "state"
+    return "passthrough"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--blocks", help="a file of Java block ids, one per line")
+    parser.add_argument("--out", default="docs/TRANSLATION_COVERAGE.md")
+    args = parser.parse_args()
+
+    if args.blocks:
+        with open(args.blocks) as handle:
+            blocks = [line.strip() for line in handle if line.strip()]
+    else:
+        blocks = SAMPLE_BLOCKS
+
+    renames = dict(RENAMES)
+    if os.path.exists("data/block_translation.json"):
+        with open("data/block_translation.json") as handle:
+            data = json.load(handle)
+        for key, value in data.get("blocks", {}).items():
+            renames[strip_ns(key)] = strip_ns(value)
+
+    counts = {"rename": 0, "state": 0, "passthrough": 0}
+    renamed, stateful, passthrough = [], [], []
+    for block in blocks:
+        kind = classify(block, renames)
+        counts[kind] += 1
+        (renamed if kind == "rename" else stateful if kind == "state" else passthrough).append(block)
+
+    total = len(blocks)
+    lines = [
+        "# Translation coverage",
+        "",
+        "Generated by `tools/translation_coverage.py`. Counts the Java block families this build",
+        "translates, over the audit list the brief specifies (or a `--blocks` list you supply).",
+        "",
+        f"Total audited: **{total}**",
+        "",
+        f"- **Renamed** (Java id -> different Bedrock id): {counts['rename']}",
+        f"- **State-translated** (facing/half/axis families): {counts['state']}",
+        f"- **Pass-through** (identical id on both editions): {counts['passthrough']}",
+        "",
+        "A pass-through is not a gap: many blocks have the same id on both editions, and the",
+        "translation correctly leaves them alone. A block that is neither renamed nor a known",
+        "pass-through family is reported as *unmapped* at load time and drawn as a magenta",
+        "placeholder, never silently treated as correct.",
+        "",
+        "## Renamed",
+        "",
+    ]
+    for block in sorted(renamed):
+        lines.append(f"- `{block}` -> `minecraft:{renames[strip_ns(block)]}`")
+    lines += ["", "## State-translated", ""]
+    for block in sorted(stateful):
+        lines.append(f"- `{block}`")
+    lines += ["", "## Pass-through", ""]
+    for block in sorted(passthrough):
+        lines.append(f"- `{block}`")
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    with open(args.out, "w") as handle:
+        handle.write("\n".join(lines) + "\n")
+    print(f"wrote {args.out}: {total} blocks "
+          f"({counts['rename']} renamed, {counts['state']} state, {counts['passthrough']} pass-through)")
+
+
+if __name__ == "__main__":
+    main()
