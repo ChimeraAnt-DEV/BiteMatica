@@ -1403,14 +1403,28 @@ void BiteMaticaMod::exportCsv() {
   const std::filesystem::path exports = mSelf->getDataDir() / "exports";
   std::error_code ec;
   std::filesystem::create_directories(exports, ec);
-  const std::filesystem::path outPath = exports / "materials.csv";
-  std::ofstream out(outPath, std::ios::trunc);
-  if (!out) {
-    setStatus("Could not write the CSV");
-    return;
+  // Rows come from the live list when a verification has run, otherwise the static list. The same
+  // rows drive both exports (I6): CSV and a plain-text shopping list.
+  std::vector<bitematica::core::LiveMaterialRow> rows = mLiveMaterials;
+  if (rows.empty()) {
+    for (const auto &entry : mMaterials) {
+      rows.push_back({entry.name, static_cast<long long>(entry.count), 0,
+                      static_cast<long long>(entry.count)});
+    }
   }
-  out << bitematica::core::LiveMaterials::toCsv(mLiveMaterials);
-  setStatus("Materials written to " + outPath.string());
+  {
+    std::ofstream out(exports / "materials.csv", std::ios::trunc);
+    if (!out) {
+      setStatus("Could not write the CSV");
+      return;
+    }
+    out << bitematica::core::LiveMaterials::toCsv(rows);
+  }
+  {
+    std::ofstream out(exports / "materials.txt", std::ios::trunc);
+    if (out) out << bitematica::core::LiveMaterials::toText(rows);
+  }
+  setStatus("Materials written to " + (exports / "materials.csv").string());
 }
 
 // --- HUD overlay ---------------------------------------------------------------------

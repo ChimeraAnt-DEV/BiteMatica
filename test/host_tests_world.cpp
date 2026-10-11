@@ -878,6 +878,63 @@ void testLiveMaterials() {
   const std::string csv = bitematica::core::LiveMaterials::toCsv(rows);
   check(csv.rfind("block,required,placed,missing", 0) == 0, "CSV has the expected header");
   check(csv.find("minecraft:stone,26,25,1") != std::string::npos, "CSV has the stone row");
+
+  // I6: a plain-text shopping list is produced.
+  const std::string text = bitematica::core::LiveMaterials::toText(rows);
+  check(text.find("minecraft:stone") != std::string::npos, "the text list has the stone row");
+}
+
+void testMaterialStackAndItemCounts() {
+  std::printf("testMaterialStackAndItemCounts\n");
+  using bitematica::core::LiveMaterials;
+
+  // I4: stacks + remainder + shulker equivalents.
+  auto s = LiveMaterials::stacksFor(140); // 140 = 2 stacks + 12
+  check(s.stacks == 2 && s.remainder == 12, "140 splits into 2 stacks + 12");
+  check(s.shulkers == 1, "140 needs one shulker box");
+  auto big = LiveMaterials::stacksFor(64 * 27 * 2 + 5); // two full shulkers + a bit
+  check(big.shulkers == 3, "the shulker count rounds up, got " + std::to_string(big.shulkers));
+  check(LiveMaterials::stacksFor(0).stacks == 0, "zero needs no stacks");
+
+  // I7: item-count edge cases.
+  bitematica::core::BlockState door;
+  door.name = "minecraft:oak_door";
+  check(LiveMaterials::itemCount(door, 2) == 1, "a two-block door is one item");
+  check(LiveMaterials::itemCount(door, 4) == 2, "four door blocks are two items");
+
+  bitematica::core::BlockState bed;
+  bed.name = "minecraft:red_bed";
+  check(LiveMaterials::itemCount(bed, 2) == 1, "a bed is one item");
+
+  bitematica::core::BlockState doubleSlab;
+  doubleSlab.name = "minecraft:oak_slab";
+  doubleSlab.states = {{"double", "1"}};
+  check(LiveMaterials::itemCount(doubleSlab, 3) == 6, "a double slab counts two items per block");
+
+  bitematica::core::BlockState pickles;
+  pickles.name = "minecraft:sea_pickle";
+  pickles.states = {{"cluster_count", "4"}};
+  check(LiveMaterials::itemCount(pickles, 1) == 4, "a 4-pickle cluster is four items");
+
+  bitematica::core::BlockState stone;
+  stone.name = "minecraft:stone";
+  check(LiveMaterials::itemCount(stone, 10) == 10, "a normal block counts one item each");
+
+  // I5: filters.
+  std::vector<bitematica::core::LiveMaterialRow> rows = {
+      {"minecraft:stone", 100, 100, 0},
+      {"minecraft:dirt", 50, 20, 30},
+  };
+  LiveMaterials::Filter onlyMissing;
+  onlyMissing.onlyMissing = true;
+  check(LiveMaterials::applyFilter(rows, onlyMissing).size() == 1, "only-missing drops completed");
+  LiveMaterials::Filter hideDone;
+  hideDone.hideCompleted = true;
+  check(LiveMaterials::applyFilter(rows, hideDone).size() == 1, "hide-completed drops completed");
+  LiveMaterials::Filter search;
+  search.search = "dirt";
+  const auto found = LiveMaterials::applyFilter(rows, search);
+  check(found.size() == 1 && found[0].name == "minecraft:dirt", "the search filters by name");
 }
 
 // --- cheat route ----------------------------------------------------------------------
@@ -931,6 +988,7 @@ int main() {
   testLitematicWriteRoundTrip();
   testBlockEntityRoundTrip();
   testLiveMaterials();
+  testMaterialStackAndItemCounts();
   testCheatCommands();
   std::printf("============================\n");
   std::printf("%d checks, %d failures\n", g_checks, g_failures);
