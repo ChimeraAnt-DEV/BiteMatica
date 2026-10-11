@@ -41,6 +41,8 @@ const Functions &resolve() {
   LOAD(CullFace, "glCullFace");
   LOAD(FrontFace, "glFrontFace");
   LOAD(BlendFuncSeparate, "glBlendFuncSeparate");
+  LOAD(BlendEquationSeparate, "glBlendEquationSeparate");
+  LOAD(ColorMask, "glColorMask");
   LOAD(Viewport, "glViewport");
   LOAD(GenBuffers, "glGenBuffers");
   LOAD(BindBuffer, "glBindBuffer");
