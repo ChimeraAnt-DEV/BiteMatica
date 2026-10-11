@@ -113,6 +113,7 @@ python3 "$ROOT/tools/pack_antegg.py" \
   --config "$ROOT/packaging/config" \
   --schematics "$ROOT/assets/schematics" \
   --extra "data/block_colors.json=$ROOT/data/block_colors.json" \
+  --extra "data/block_translation.json=$ROOT/data/block_translation.json" \
   --out "$DIST_DIR/BiteMatica-$VERSION.antegg"
 
 echo "==> Done: $DIST_DIR/BiteMatica-$VERSION.antegg"

@@ -18,6 +18,8 @@
 #include "format/LitematicWriter.hpp"
 #include "format/SchematicFormat.hpp"
 #include "mesh/SectionMesher.hpp"
+#include "nbt/NbtReader.hpp"
+#include "nbt/NbtWriter.hpp"
 #include "render/MathTypes.hpp"
 #include "render/PlacementCull.hpp"
 #include "translate/BlockTranslation.hpp"
@@ -701,6 +703,46 @@ void testBlockTranslation() {
   const auto logOut = BlockTranslation::toBedrock(log);
   check(logOut.name == "minecraft:oak_log" && logOut.states.size() == 1,
         "an untranslated block passes through unchanged");
+
+  // A door's facing and hinge are translated (a door is a directional family).
+  bitematica::core::BlockState door;
+  door.name = "minecraft:oak_door";
+  door.states = {{"facing", "west"}, {"half", "bottom"}, {"hinge", "right"}};
+  const auto doorOut = BlockTranslation::toBedrock(door);
+  bool doorDirection = false;
+  for (const auto &[k, v] : doorOut.states) {
+    if (k == "weirdo_direction") doorDirection = (v == "1"); // west -> 1
+  }
+  check(doorDirection, "a door facing=west becomes weirdo_direction=1");
+
+  // G2: the data-driven table merges over the built-in renames.
+  BlockTranslation::clearUnmapped();
+  const int merged = BlockTranslation::loadJson(
+      R"({"blocks": {"minecraft:my_mod_block": "minecraft:stone"}})");
+  check(merged == 1, "one rename merged from JSON, got " + std::to_string(merged));
+  bitematica::core::BlockState modded;
+  modded.name = "minecraft:my_mod_block";
+  check(BlockTranslation::toBedrock(modded).name == "minecraft:stone",
+        "the merged rename is applied");
+
+  // G4: an unknown id is reported as unmapped, not silently accepted.
+  BlockTranslation::clearUnmapped();
+  bitematica::core::BlockState weird;
+  weird.name = "minecraft:totally_unknown_xyz";
+  check(BlockTranslation::isUnmapped(weird.name), "an unknown id is flagged unmapped");
+  const auto unmapped = BlockTranslation::unmappedBlocks();
+  bool recorded = false;
+  for (const auto &name : unmapped) {
+    if (name == "totally_unknown_xyz") recorded = true;
+  }
+  check(recorded, "the unmapped id is recorded for the status line");
+
+  // G7: a newer game version than the table is flagged.
+  check(!BlockTranslation::isVersionNewerThanTable("1.26.51"),
+        "the table's own version is not flagged as newer");
+  check(BlockTranslation::isVersionNewerThanTable("1.26.60"),
+        "a newer game version is flagged");
+  check(!BlockTranslation::isVersionNewerThanTable(""), "an unknown version is not flagged");
 }
 
 // --- selection + writers --------------------------------------------------------------
@@ -754,6 +796,49 @@ void testLitematicWriteRoundTrip() {
   const auto before = bitematica::core::MaterialList::build(loaded.schematic);
   const auto after = bitematica::core::MaterialList::build(reread.schematic);
   check(before.size() == after.size(), "the same distinct materials survive");
+}
+
+/// G5: a block entity (chest contents) captured as raw NBT survives a `.litematic` round trip.
+void testBlockEntityRoundTrip() {
+  std::printf("testBlockEntityRoundTrip\n");
+  // Build a 1x1x1 chest schematic with one block entity.
+  bitematica::core::Schematic s;
+  s.name = "chest test";
+  s.palette.intern(bitematica::core::BlockState{});
+  bitematica::core::BlockState chest;
+  chest.name = "minecraft:chest";
+  s.palette.intern(chest);
+  s.bounds.min = {0, 0, 0};
+  s.bounds.max = {0, 0, 0};
+  s.blocks = {1};
+
+  // A minimal chest block entity as raw NBT (a named compound with an `id`).
+  bitematica::nbt::Tag be = bitematica::nbt::NbtWriter::compound("");
+  be.children.push_back(bitematica::nbt::NbtWriter::string("id", "Chest"));
+  be.children.push_back(bitematica::nbt::NbtWriter::string("CustomName", "Loot"));
+  const std::vector<uint8_t> beBytes = bitematica::nbt::NbtWriter::writeRaw(be);
+  s.blockEntities.emplace_back(0, std::string(beBytes.begin(), beBytes.end()));
+
+  const std::string encoded = bitematica::format::LitematicWriter::bytes(s, "Chest", "Tests");
+  check(!encoded.empty(), "the writer produced bytes with a block entity");
+
+  const std::vector<uint8_t> bytes(encoded.begin(), encoded.end());
+  const auto reread = bitematica::format::SchematicFormat::read(bytes, "chest.litematic");
+  check(reread.success, std::string("the written litematic reloads: ") + reread.error);
+  // The block-entity list must survive in the written document (read back through the reader).
+  const auto doc = bitematica::nbt::NbtReader::readFile(bytes);
+  check(doc.valid(), "the document re-parses");
+  const bitematica::nbt::Tag *regions = doc.root.find("Regions");
+  check(regions != nullptr, "the Regions compound is present");
+  if (regions != nullptr && !regions->children.empty()) {
+    const bitematica::nbt::Tag *entities = regions->children.front().find("BlockEntities");
+    check(entities != nullptr, "the BlockEntities list is written");
+    if (entities != nullptr) {
+      check(!entities->children.empty(), "the chest block entity survived");
+      const bitematica::nbt::Tag *name = entities->children.front().find("CustomName");
+      check(name != nullptr && name->stringValue == "Loot", "the block entity's data survived");
+    }
+  }
 }
 
 // --- live materials -------------------------------------------------------------------
@@ -844,6 +929,7 @@ int main() {
   testBlockTranslation();
   testSelectionCapture();
   testLitematicWriteRoundTrip();
+  testBlockEntityRoundTrip();
   testLiveMaterials();
   testCheatCommands();
   std::printf("============================\n");
