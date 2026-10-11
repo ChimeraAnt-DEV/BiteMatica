@@ -95,6 +95,15 @@ schematics/demo_house.litematic
 `getExternalFilesDir()/AntEggs/<slug>/`, so the mod's runtime root (and therefore its
 `schematics/` folder) is `<that>/bitematica/`.
 
+**A native `.AntEgg` needs two manifests.** `egg.json` is only what `.AntEgg` validation
+reads. The preloader's own `ModManifest.cpp` separately requires `manifest.json` at the
+extracted mod root and refuses to load a library unless it is present, has
+`type: "preload-native"`, and its `entry` resolves to an existing `.so` inside the mod
+directory. Ship both, and keep their entry paths identical — `pack_antegg.py` enforces
+this. Without `manifest.json` the package validates and extracts, then fails at
+injection with `Failed to parse mod manifest`. The `icon` path in `manifest.json` must
+also resolve inside the package (shipped as `icon.png`).
+
 ## Attribution constraints
 
 Keep the README's attribution: the concept is Litematica's (maruohon) and malilib's; this
