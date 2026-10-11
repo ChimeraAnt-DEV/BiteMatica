@@ -114,6 +114,36 @@ inline Mat4 lookAt(const Vec3 &eye, const Vec3 &forward, const Vec3 &up) {
   return out;
 }
 
+/// The placement's local -> world transform: rotate about the Y axis, then translate.
+///
+/// Built to match the vertex shader *exactly* (`x' = x*cos - z*sin + ox`, `z' = x*sin + z*cos + oz`),
+/// because culling happens in this space and a sign disagreement between the two would cull the
+/// wrong sections. Column-major, so `viewProjection * localToWorld` maps local coordinates straight
+/// to clip space and the frustum can be tested against axis-aligned local section boxes.
+inline Mat4 placementLocalToWorld(const Vec3 &origin, float yawDegrees) {
+  const float radians = yawDegrees * static_cast<float>(std::numbers::pi) / 180.0f;
+  const float c = std::cos(radians);
+  const float s = std::sin(radians);
+  Mat4 out;
+  out.m[0] = c;   out.m[8] = -s;
+  out.m[2] = s;   out.m[10] = c;
+  out.m[12] = origin.x;
+  out.m[13] = origin.y;
+  out.m[14] = origin.z;
+  return out;
+}
+
+/// Transforms a world point into the placement's local space (the inverse of the above).
+inline Vec3 worldToPlacementLocal(const Vec3 &origin, float yawDegrees, const Vec3 &world) {
+  const float radians = yawDegrees * static_cast<float>(std::numbers::pi) / 180.0f;
+  const float c = std::cos(radians);
+  const float s = std::sin(radians);
+  const float dx = world.x - origin.x;
+  const float dz = world.z - origin.z;
+  // Inverse of a rotation is its transpose.
+  return Vec3{c * dx + s * dz, world.y - origin.y, -s * dx + c * dz};
+}
+
 /// The six clip planes extracted from a world->clip matrix, for frustum culling.
 ///
 /// Each plane is stored as (a, b, c, d) with the inside being `a*x + b*y + c*z + d >= 0`.

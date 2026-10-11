@@ -256,6 +256,61 @@ void testFrustumCull() {
   check(!behind, "a box behind the camera is culled");
 }
 
+void testPlacementLocalTransformMatchesShader() {
+  std::printf("testPlacementLocalTransformMatchesShader\n");
+  // The cull runs in placement-local space, so `placementLocalToWorld` must agree with the vertex
+  // shader exactly: x' = x*cos - z*sin + ox, z' = x*sin + z*cos + oz. A sign disagreement here
+  // culls the wrong sections, which is exactly the bug this guards.
+  const bitematica::render::Vec3 origin{10.0f, 64.0f, -5.0f};
+  for (int rotation = 0; rotation < 4; ++rotation) {
+    const float yaw = static_cast<float>(rotation * 90);
+    const auto m = bitematica::render::placementLocalToWorld(origin, yaw);
+    const float radians = yaw * 3.14159265358979f / 180.0f;
+    const float c = std::cos(radians);
+    const float s = std::sin(radians);
+
+    const bitematica::render::Vec3 local{3.0f, 1.0f, -2.0f};
+    const auto world = m.transformPoint(local);
+    const float expectedX = local.x * c - local.z * s + origin.x;
+    const float expectedZ = local.x * s + local.z * c + origin.z;
+    check(std::fabs(world.x - expectedX) < 0.001f,
+          "local->world X matches the shader at yaw " + std::to_string(rotation * 90));
+    check(std::fabs(world.z - expectedZ) < 0.001f,
+          "local->world Z matches the shader at yaw " + std::to_string(rotation * 90));
+
+    // And the inverse must round-trip.
+    const auto back = bitematica::render::worldToPlacementLocal(origin, yaw, world);
+    check(std::fabs(back.x - local.x) < 0.001f && std::fabs(back.z - local.z) < 0.001f,
+          "world->local inverts local->world at yaw " + std::to_string(rotation * 90));
+  }
+}
+
+void testRotatedPlacementFrustumCull() {
+  std::printf("testRotatedPlacementFrustumCull\n");
+  // The regression this guards: with the old world-space cull, a rotated placement's section boxes
+  // were axis-aligned in world space but the geometry was rotated, so sections vanished at the
+  // screen edges. Culling in placement-local space fixes it. A section far out on the local +X axis
+  // must stay visible in front of the camera at every rotation once the frustum is built the same
+  // way the renderer builds it.
+  const bitematica::render::Vec3 origin{0.0f, 0.0f, 0.0f};
+  // A camera looking down -Z from a little behind the origin.
+  const auto viewProjection = bitematica::render::Mat4::multiply(
+      bitematica::render::perspective(70.0f, 1.0f, 0.1f, 1000.0f),
+      bitematica::render::lookAt({0, 0, 20}, {0, 0, -1}, {0, 1, 0}));
+
+  // A local section box centred near the origin stays inside the frustum for every rotation,
+  // because the frustum is transformed with it.
+  for (int rotation = 0; rotation < 4; ++rotation) {
+    const float yaw = static_cast<float>(rotation * 90);
+    const auto localToWorld = bitematica::render::placementLocalToWorld(origin, yaw);
+    const auto localVp = bitematica::render::Mat4::multiply(viewProjection, localToWorld);
+    const auto frustum = bitematica::render::Frustum::fromViewProjection(localVp);
+    const bool visible = frustum.intersectsBox({-8, -8, -8}, {8, 8, 8});
+    check(visible, "a local box at the origin is visible at yaw " +
+                       std::to_string(rotation * 90));
+  }
+}
+
 // --- verification ---------------------------------------------------------------------
 
 void testVerification() {
@@ -481,6 +536,8 @@ int main() {
   testNegativeSizeLitematic();
   testMesherEmptyForAirOnly();
   testFrustumCull();
+  testPlacementLocalTransformMatchesShader();
+  testRotatedPlacementFrustumCull();
   testVerification();
   testVerificationUnavailable();
   testVerificationExtras();

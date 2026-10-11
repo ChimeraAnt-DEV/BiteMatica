@@ -96,7 +96,9 @@ void SchematicRenderer::saveState(SavedState &state) const {
   geti(GL_VERTEX_ARRAY_BINDING, &state.vao);
   geti(GL_ARRAY_BUFFER, &state.arrayBuffer);
   geti(GL_ELEMENT_ARRAY_BUFFER, &state.elementBuffer);
-  geti(GL_TEXTURE_BINDING_2D, &state.texture2d);
+  // The shader binds no texture, so the 2D binding is left alone; only the active unit is global
+  // state the game may depend on, so it is captured and restored.
+  geti(GL_ACTIVE_TEXTURE, &state.activeTexture);
   getb(GL_BLEND, &state.blend);
   getb(GL_DEPTH_TEST, &state.depthTest);
   getb(GL_CULL_FACE, &state.cullFace);
@@ -104,8 +106,16 @@ void SchematicRenderer::saveState(SavedState &state) const {
   geti(GL_DEPTH_FUNC, &state.depthFunc);
   geti(GL_CULL_FACE_MODE, &state.cullMode);
   geti(GL_FRONT_FACE, &state.frontFace);
-  geti(GL_BLEND_SRC_RGB, &state.blendSrc);
-  geti(GL_BLEND_DST_RGB, &state.blendDst);
+  geti(GL_BLEND_SRC_RGB, &state.blendSrcRgb);
+  geti(GL_BLEND_DST_RGB, &state.blendDstRgb);
+  geti(GL_BLEND_SRC_ALPHA, &state.blendSrcAlpha);
+  geti(GL_BLEND_DST_ALPHA, &state.blendDstAlpha);
+  geti(GL_BLEND_EQUATION_RGB, &state.blendEquationRgb);
+  geti(GL_BLEND_EQUATION_ALPHA, &state.blendEquationAlpha);
+  // The game may leave these enabled, which would make the ghost invisible or clipped.
+  getb(GL_STENCIL_TEST, &state.stencilTest);
+  getb(GL_SCISSOR_TEST, &state.scissorTest);
+  geti(GL_COLOR_WRITEMASK, state.colorMask);
 }
 
 void SchematicRenderer::restoreState(const SavedState &state) const {
@@ -113,7 +123,6 @@ void SchematicRenderer::restoreState(const SavedState &state) const {
   auto bindVao = reinterpret_cast<glBindVertexArray_t>(g.BindVertexArray);
   auto bindBuf = reinterpret_cast<glBindBuffer_t>(g.BindBuffer);
   auto useProg = reinterpret_cast<glUseProgram_t>(g.UseProgram);
-  auto bindTex = reinterpret_cast<glBindTexture_t>(g.BindTexture);
   auto activeTex = reinterpret_cast<glActiveTexture_t>(g.ActiveTexture);
   auto enable = reinterpret_cast<glEnable_t>(g.Enable);
   auto disable = reinterpret_cast<glDisable_t>(g.Disable);
@@ -122,11 +131,14 @@ void SchematicRenderer::restoreState(const SavedState &state) const {
   auto cullFace = reinterpret_cast<glCullFace_t>(g.CullFace);
   auto frontFace = reinterpret_cast<glFrontFace_t>(g.FrontFace);
   auto blendFunc = reinterpret_cast<glBlendFuncSeparate_t>(g.BlendFuncSeparate);
+  auto blendEquation =
+      reinterpret_cast<void (*)(GLenum, GLenum)>(g.BlendEquationSeparate);
+  auto colorMask = reinterpret_cast<void (*)(GLboolean, GLboolean, GLboolean, GLboolean)>(
+      g.ColorMask);
 
   // Restore in the reverse order of how they were set, and restore *everything* — a stale binding
   // left behind is what corrupts the game's next draw.
-  activeTex(GL_TEXTURE0);
-  bindTex(GL_TEXTURE_2D, static_cast<GLuint>(state.texture2d));
+  activeTex(static_cast<GLenum>(state.activeTexture));
   bindVao(static_cast<GLuint>(state.vao));
   bindBuf(GL_ARRAY_BUFFER, static_cast<GLuint>(state.arrayBuffer));
   bindBuf(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLuint>(state.elementBuffer));
@@ -134,13 +146,22 @@ void SchematicRenderer::restoreState(const SavedState &state) const {
   if (state.blend) enable(GL_BLEND); else disable(GL_BLEND);
   if (state.depthTest) enable(GL_DEPTH_TEST); else disable(GL_DEPTH_TEST);
   if (state.cullFace) enable(GL_CULL_FACE); else disable(GL_CULL_FACE);
+  if (state.stencilTest) enable(GL_STENCIL_TEST); else disable(GL_STENCIL_TEST);
+  if (state.scissorTest) enable(GL_SCISSOR_TEST); else disable(GL_SCISSOR_TEST);
   depthMask(state.depthMask);
   depthFunc(static_cast<GLenum>(state.depthFunc));
   cullFace(static_cast<GLenum>(state.cullMode));
   frontFace(static_cast<GLenum>(state.frontFace));
   if (blendFunc) {
-    blendFunc(static_cast<GLenum>(state.blendSrc), static_cast<GLenum>(state.blendDst),
-              static_cast<GLenum>(state.blendSrc), static_cast<GLenum>(state.blendDst));
+    blendFunc(static_cast<GLenum>(state.blendSrcRgb), static_cast<GLenum>(state.blendDstRgb),
+              static_cast<GLenum>(state.blendSrcAlpha), static_cast<GLenum>(state.blendDstAlpha));
+  }
+  if (blendEquation) {
+    blendEquation(static_cast<GLenum>(state.blendEquationRgb),
+                  static_cast<GLenum>(state.blendEquationAlpha));
+  }
+  if (colorMask) {
+    colorMask(state.colorMask[0], state.colorMask[1], state.colorMask[2], state.colorMask[3]);
   }
 }
 
@@ -175,7 +196,12 @@ bool SchematicRenderer::initialize() {
 
   const GLuint vs = compile(kVertexShaderType, kVertexSource);
   const GLuint fs = compile(kFragmentShaderType, kFragmentSource);
-  if (vs == 0 || fs == 0) return false;
+  if (vs == 0 || fs == 0) {
+    // A failed pair must not leak the shader that did compile.
+    if (vs != 0) deleteShader(vs);
+    if (fs != 0) deleteShader(fs);
+    return false;
+  }
 
   mProgram = createProgram();
   attachShader(mProgram, vs);
@@ -183,17 +209,25 @@ bool SchematicRenderer::initialize() {
   linkProgram(mProgram);
   GLint linked = 0;
   getProgramiv(mProgram, kLinkStatus, &linked);
+  // The shaders are owned by the program once attached; they are deleted either way.
   deleteShader(vs);
   deleteShader(fs);
   if (linked == 0) {
+    if (mProgram != 0 && g.DeleteProgram) {
+      reinterpret_cast<void (*)(GLuint)>(g.DeleteProgram)(mProgram);
+    }
     mProgram = 0;
     return false;
   }
 
+  // Resolve every uniform once, here, rather than per frame. A uniform lookup is a string compare
+  // against the program's reflection data; doing it on the render thread every frame is waste.
   auto getUniformLocation = reinterpret_cast<glGetUniformLocation_t>(g.GetUniformLocation);
   mUniformMvp = getUniformLocation(mProgram, "uMvp");
   mUniformAlpha = getUniformLocation(mProgram, "uAlpha");
-  mUniformMode = getUniformLocation(mProgram, "uMode");
+  mUniformPlacementOrigin = getUniformLocation(mProgram, "uPlacementOrigin");
+  mUniformPlacementYawCos = getUniformLocation(mProgram, "uPlacementYawCos");
+  mUniformPlacementYawSin = getUniformLocation(mProgram, "uPlacementYawSin");
   mReady = true;
   return true;
 }
@@ -270,14 +304,19 @@ void SchematicRenderer::releaseSection(SectionBuffer &buffer) {
 }
 
 void SchematicRenderer::shutdown() {
-  mReady = false;
+  const Functions &g = resolve();
+  if (mProgram != 0 && g.DeleteProgram) {
+    reinterpret_cast<void (*)(GLuint)>(g.DeleteProgram)(mProgram);
+  }
   mProgram = 0;
+  mReady = false;
 }
 
-void SchematicRenderer::draw(const render::Mat4 &viewProjection, const render::Vec3 &placementOrigin,
+void SchematicRenderer::draw(const render::Mat4 &localViewProjection,
+                             const render::Vec3 &placementOrigin,
                              float placementRotationDegrees, DrawMode mode, float alpha,
-                             const render::Vec3 &cameraPosition, float maxDistance,
-                             const render::Frustum &frustum,
+                             const render::Vec3 &localCameraPosition, float maxDistance,
+                             const render::Frustum &localFrustum,
                              const std::vector<SectionBuffer> &sections) {
   mLastTriangles = 0;
   mLastSections = 0;
@@ -322,37 +361,30 @@ void SchematicRenderer::draw(const render::Mat4 &viewProjection, const render::V
   // No textures are bound by this program, but a stray binding would be sampled by the game's next
   // draw, so it is restored by restoreState regardless.
 
-  uniformMatrix(mUniformMvp, 1, GL_FALSE, viewProjection.m);
+  uniformMatrix(mUniformMvp, 1, GL_FALSE, localViewProjection.m);
   uniform1f(mUniformAlpha, alpha);
 
   const float yawRadians = placementRotationDegrees * 3.14159265358979f / 180.0f;
-  // The yaw is passed as pre-computed sin/cos so the shader avoids a trig call per vertex.
-  auto getUniformLocation = reinterpret_cast<glGetUniformLocation_t>(g.GetUniformLocation);
+  // The yaw is passed as pre-computed sin/cos so the shader avoids a trig call per vertex. The
+  // locations were resolved once at init.
   auto uniform3f = reinterpret_cast<void (*)(GLint, GLfloat, GLfloat, GLfloat)>(g.Uniform3f);
-  const GLint locOrigin = getUniformLocation(mProgram, "uPlacementOrigin");
-  const GLint locCos = getUniformLocation(mProgram, "uPlacementYawCos");
-  const GLint locSin = getUniformLocation(mProgram, "uPlacementYawSin");
-  if (uniform3f && locOrigin >= 0) {
-    uniform3f(locOrigin, placementOrigin.x, placementOrigin.y, placementOrigin.z);
+  if (uniform3f && mUniformPlacementOrigin >= 0) {
+    uniform3f(mUniformPlacementOrigin, placementOrigin.x, placementOrigin.y, placementOrigin.z);
   }
-  if (locCos >= 0) uniform1f(locCos, std::cos(yawRadians));
-  if (locSin >= 0) uniform1f(locSin, std::sin(yawRadians));
+  if (mUniformPlacementYawCos >= 0) uniform1f(mUniformPlacementYawCos, std::cos(yawRadians));
+  if (mUniformPlacementYawSin >= 0) uniform1f(mUniformPlacementYawSin, std::sin(yawRadians));
 
   for (const SectionBuffer &section : sections) {
     if (!section.uploaded || section.indexCount == 0) continue;
-    // Distance cull.
+    // Both culls run in placement-local space, where a section's box is axis-aligned regardless of
+    // the placement's rotation. The camera was transformed into this space by the caller.
     if (maxDistance > 0.0f) {
       const render::Vec3 center{(section.min.x + section.max.x) * 0.5f,
                                 (section.min.y + section.max.y) * 0.5f,
                                 (section.min.z + section.max.z) * 0.5f};
-      if (render::length(center - cameraPosition) > maxDistance) continue;
+      if (render::length(center - localCameraPosition) > maxDistance) continue;
     }
-    // Frustum cull against the section's world-space box (translated by the placement origin).
-    const render::Vec3 boxMin{section.min.x + placementOrigin.x, section.min.y + placementOrigin.y,
-                              section.min.z + placementOrigin.z};
-    const render::Vec3 boxMax{section.max.x + placementOrigin.x, section.max.y + placementOrigin.y,
-                              section.max.z + placementOrigin.z};
-    if (!frustum.intersectsBox(boxMin, boxMax)) continue;
+    if (!localFrustum.intersectsBox(section.min, section.max)) continue;
 
     bindVertexArray(section.vao);
     drawElements(GL_TRIANGLES, section.indexCount, GL_UNSIGNED_INT, nullptr);
