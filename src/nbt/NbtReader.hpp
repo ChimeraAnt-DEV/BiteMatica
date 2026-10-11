@@ -40,6 +40,10 @@ private:
   const std::vector<uint8_t> &mBytes;
   size_t mPos{};
   std::string mError;
+  /// Current nesting depth, to reject a cyclic/deeply-nested document before the stack overflows
+  /// (L4). A real schematic nests a handful deep; the cap is generous.
+  int mDepth{};
+  static constexpr int kMaxDepth = 512;
 
   bool fail(const std::string &message);
   bool ok() const { return mError.empty(); }

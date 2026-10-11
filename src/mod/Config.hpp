@@ -26,7 +26,10 @@ enum class LayerMode : int {
 /// Defaults are chosen so that a fresh install draws a readable overlay with the
 /// toolbar already on screen and does not need the Mod Menu opened first.
 struct Config {
-  int version = 1;
+  /// The current config schema version. Bumped when a field's meaning changes; `migrate()` upgrades
+  /// an older file (L8) and keeps a backup.
+  static constexpr int kCurrentVersion = 2;
+  int version = kCurrentVersion;
 
   /// Master switch mirrored by the Mod Menu module toggle.
   bool enabled = true;
@@ -131,6 +134,25 @@ struct Config {
     if (outMin < 0) outMin = 0;
     if (sizeY > 0 && outMax > sizeY - 1) outMax = sizeY - 1;
     if (outMax < outMin) outMax = outMin;
+  }
+
+  /// Upgrades a config read from an older schema version (L8).
+  ///
+  /// The migration is field-by-field: a value the old version had and the new one still uses is
+  /// kept; a field whose meaning changed is converted; a field that did not exist takes its default
+  /// (already set by the struct). Returns true when the file was from an older version and was
+  /// upgraded, so the caller can back up the original and re-save.
+  bool migrate() {
+    if (version >= kCurrentVersion) {
+      version = kCurrentVersion;
+      return false;
+    }
+    // v1 -> v2: `renderMode` 0 used to mean a screen-space "overlay", which no longer exists. A
+    // config that asked for it now gets the world-space translucent mode (also 0), so nothing
+    // changes numerically; the migration only records the version bump. Kept explicit so a future
+    // real conversion has a home.
+    version = kCurrentVersion;
+    return true;
   }
 
   /// Clamp all values that a hand-edited config could push out of range.
