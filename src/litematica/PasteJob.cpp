@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 
 namespace bitematica::litematica {
 
@@ -90,6 +91,62 @@ std::vector<std::string> PasteJob::build(const core::Schematic &schematic,
     }
   }
   return commands;
+}
+
+std::string PasteJob::mcfunctionText(const std::vector<std::string> &commands) {
+  // A `.mcfunction` file: one command per line, no leading slash (a function is already a command
+  // context). A trailing newline keeps text tools happy.
+  std::string out;
+  for (const std::string &command : commands) {
+    out += command;
+    out += '\n';
+  }
+  return out;
+}
+
+long long PasteJob::overwriteCount(const core::Schematic &schematic,
+                                   const world::Placement &placement,
+                                   const std::function<bool(const core::BlockPos &)> &isSolid,
+                                   const PasteOptions &options) {
+  long long count = 0;
+  if (schematic.empty() || !isSolid) return 0;
+  for (int y = 0; y < schematic.sizeY(); ++y) {
+    for (int z = 0; z < schematic.sizeZ(); ++z) {
+      for (int x = 0; x < schematic.sizeX(); ++x) {
+        const core::BlockState &state = schematic.stateAt(x, y, z);
+        // Air is only overwritten when `skipAir` is off (a true "replace everything" paste).
+        if (state.isAir() && options.skipAir) continue;
+        const core::BlockPos world = placement.toWorld(schematic, x, y, z);
+        if (isSolid(world)) ++count;
+      }
+    }
+  }
+  return count;
+}
+
+bool PasteJob::nextSuggestedBlock(const core::Schematic &schematic,
+                                  const world::Placement &placement,
+                                  const std::vector<uint8_t> &statuses, int layerMin, int layerMax,
+                                  core::BlockPos &outWorld, core::BlockState &outWanted) {
+  if (schematic.empty() || statuses.size() != schematic.blocks.size()) return false;
+  // Scan bottom-up so the lowest incomplete layer is suggested first, which is how a player builds.
+  for (int y = layerMin; y <= layerMax && y < schematic.sizeY(); ++y) {
+    if (y < 0) continue;
+    for (int z = 0; z < schematic.sizeZ(); ++z) {
+      for (int x = 0; x < schematic.sizeX(); ++x) {
+        const size_t index = static_cast<size_t>(schematic.indexOf(x, y, z));
+        // Missing (1) or WrongBlock (2) or WrongState (3) are all "place this next".
+        const uint8_t status = statuses[index];
+        if (status != 1 && status != 2 && status != 3) continue;
+        const core::BlockState &wanted = schematic.stateAt(x, y, z);
+        if (wanted.isAir()) continue;
+        outWorld = placement.toWorld(schematic, x, y, z);
+        outWanted = wanted;
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 } // namespace bitematica::litematica

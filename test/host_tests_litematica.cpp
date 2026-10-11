@@ -632,6 +632,45 @@ void testPasteCommands() {
   check(id.find("\"weirdo_direction\"=3") != std::string::npos,
         "numeric states are unquoted: " + id);
   check(id.find("\"half\"=\"top\"") != std::string::npos, "string states are quoted: " + id);
+
+  // H7: an .mcfunction body has one command per line with no leading slash.
+  const std::string mcfunction = bitematica::litematica::PasteJob::mcfunctionText(commands);
+  check(mcfunction.find('/') == std::string::npos, "mcfunction lines carry no leading slash");
+  check(mcfunction.find("fill 10 64 20") != std::string::npos, "mcfunction keeps the command");
+
+  // H8: the overwrite count reflects the world blocks a paste would replace.
+  auto world = [](const std::vector<bitematica::core::BlockPos> &solid) {
+    return [solid](const bitematica::core::BlockPos &p) {
+      for (const auto &b : solid) {
+        if (b == p) return true;
+      }
+      return false;
+    };
+  };
+  const long long overwrites = bitematica::litematica::PasteJob::overwriteCount(
+      schematic, placement, world({{10, 64, 20}, {11, 64, 20}}));
+  check(overwrites == 2, "two of the four target cells are occupied, got " +
+                             std::to_string(overwrites));
+
+  // H9: survival guidance suggests the lowest missing block.
+  bitematica::core::Schematic tall;
+  tall.bounds = {{0, 0, 0}, {0, 2, 0}}; // a 1x3x1 column
+  tall.allocateBlocks();
+  const uint32_t s2 = tall.palette.intern({"minecraft:stone", {}});
+  for (int y = 0; y < 3; ++y) tall.setBlock(0, y, 0, s2);
+  // y=0 correct, y=1 missing, y=2 correct.
+  std::vector<uint8_t> statuses(tall.blocks.size(), 0);
+  statuses[static_cast<size_t>(tall.indexOf(0, 1, 0))] = 1;
+  bitematica::world::Placement p2;
+  p2.origin = {0, 0, 0};
+  bitematica::core::BlockPos suggested;
+  bitematica::core::BlockState wanted;
+  const bool hasSuggestion = bitematica::litematica::PasteJob::nextSuggestedBlock(
+      tall, p2, statuses, 0, 2, suggested, wanted);
+  check(hasSuggestion, "a missing block is suggested");
+  check(suggested.y == 1, "the suggestion is the missing layer, got y=" +
+                              std::to_string(suggested.y));
+  check(wanted.name == "minecraft:stone", "the suggested block is the wanted one");
 }
 
 // --- menu -----------------------------------------------------------------------------
