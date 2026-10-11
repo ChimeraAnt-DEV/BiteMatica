@@ -205,7 +205,7 @@ void testToolbarHitTest() {
   const auto buttons = bitematica::render::HudOverlay::layoutToolbar(config);
   // Twelve original controls plus six world-space additions (verify, layers, move, rotate,
   // mirror, CSV export).
-  check(buttons.size() == 23, "twenty-three toolbar buttons, got " +
+  check(buttons.size() == 24, "twenty-four toolbar buttons, got " +
                                   std::to_string(buttons.size()));
 
   const auto &first = buttons.front();
@@ -220,10 +220,37 @@ void testToolbarHitTest() {
   check(miss == nullptr, "a point outside every button misses");
 }
 
+/// J4: the toolbar scale grows the touch targets, and the config clamps a too-small scale up to the
+/// accessibility floor so a button is never below ~48 px.
+void testToolbarScaleAndTouchFloor() {
+  std::printf("testToolbarScaleAndTouchFloor\n");
+  bitematica::mod::Config small;
+  small.uiScale = 1.0f; // below the floor; normalize clamps it
+  small.normalize();
+  check(small.uiScale >= 1.2f, "a scale below the floor is clamped up");
+  const auto buttons = bitematica::render::HudOverlay::layoutToolbar(small);
+  check(!buttons.empty() && buttons.front().w >= 48.0f,
+        "the smallest button is at least 48 px, got " + std::to_string(buttons.front().w));
+
+  bitematica::mod::Config big;
+  big.uiScale = 2.0f;
+  big.normalize();
+  const auto bigButtons = bitematica::render::HudOverlay::layoutToolbar(big);
+  check(bigButtons.front().w > buttons.front().w, "a larger scale makes bigger buttons");
+
+  // J9: the text scale and palette preset are clamped.
+  bitematica::mod::Config acc;
+  acc.textScale = 0.1f;
+  acc.palettePreset = 9;
+  acc.normalize();
+  check(acc.textScale >= 0.8f, "text scale is clamped to the minimum");
+  check(acc.palettePreset == 0, "an out-of-range palette preset falls back to default");
+}
+
 void testControllerNavigation() {
   std::printf("testControllerNavigation\n");
   bitematica::mod::ControllerNavigator nav;
-  const int count = 23;
+  const int count = 24;
 
   auto result = nav.handleKey(bitematica::mod::ControllerNavigator::DpadRight, true, count);
   check(result.handled && !result.activated, "d-pad right moves focus, does not activate");
@@ -447,6 +474,7 @@ int main() {
   testStructure();
   testDetection();
   testToolbarHitTest();
+  testToolbarScaleAndTouchFloor();
   testControllerNavigation();
   testChromeCommands();
   testChromeNeverDrawsSchematicGeometry();

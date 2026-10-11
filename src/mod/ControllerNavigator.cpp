@@ -31,6 +31,7 @@ const char *ControllerNavigator::actionName(render::ToolbarButton::Action action
     case Action::ApplyTool: return "Use tool";
     case Action::OpenMenu: return "Open menu";
     case Action::CycleMenuTab: return "Next menu tab";
+    case Action::PanicToggle: return "Hide/show rendering";
   }
   return "Action";
 }
@@ -102,7 +103,7 @@ render::ToolbarButton::Action ControllerNavigator::actionForIndex(int index) {
       Action::Verify,       Action::CycleLayers, Action::MoveToPlayer,
       Action::RotatePlacement, Action::CycleMirror, Action::ExportCsv,
       Action::SaveLitematic, Action::CycleToolMode, Action::ApplyTool,
-      Action::OpenMenu, Action::CycleMenuTab, Action::Reload,
+      Action::OpenMenu, Action::CycleMenuTab, Action::PanicToggle,
   };
   const int count = static_cast<int>(sizeof(order) / sizeof(order[0]));
   if (index < 0) index = 0;

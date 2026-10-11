@@ -39,6 +39,8 @@ const ButtonSpec kButtons[] = {
     // Litematica toolset.
     {Action::CycleToolMode, "T"}, {Action::ApplyTool, "A"},
     {Action::OpenMenu, "N"},      {Action::CycleMenuTab, "Tab"},
+    // Panic toggle (J6): a dedicated, always-present way to hide everything instantly.
+    {Action::PanicToggle, "H"},
 };
 
 constexpr int kColumns = 6;
@@ -62,16 +64,20 @@ std::string formatCount(long long value) {
 std::vector<ToolbarButton> HudOverlay::layoutToolbar(const mod::Config &config) {
   std::vector<ToolbarButton> buttons;
   const int count = static_cast<int>(sizeof(kButtons) / sizeof(kButtons[0]));
+  // The scale (J4) grows every button and the gap together, so the grid stays proportional and the
+  // touch targets stay above the accessibility floor (enforced by `Config::normalize`).
+  const float size = kButtonSize * config.uiScale;
+  const float gap = kButtonGap * config.uiScale;
   for (int i = 0; i < count; ++i) {
     const int row = i / kColumns;
     const int column = i % kColumns;
     ToolbarButton button;
     button.action = kButtons[i].action;
     button.label = kButtons[i].label;
-    button.x = static_cast<float>(config.toolbarX) + column * (kButtonSize + kButtonGap);
-    button.y = static_cast<float>(config.toolbarY) + row * (kButtonSize + kButtonGap);
-    button.w = kButtonSize;
-    button.h = kButtonSize;
+    button.x = static_cast<float>(config.toolbarX) + column * (size + gap);
+    button.y = static_cast<float>(config.toolbarY) + row * (size + gap);
+    button.w = size;
+    button.h = size;
     switch (button.action) {
       case Action::ToggleMaterials:
         button.active = config.showMaterialList;
