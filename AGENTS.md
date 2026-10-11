@@ -123,11 +123,21 @@ src/render/HudOverlay.cpp src/mod/ControllerNavigator.cpp src/mod/JsonConfig.cpp
   cannot resolve it and the launcher shows "Built for a different game build (missing symbol)".
   GlowberryClient pins a preloader commit that predates `pl/Render.hpp`, so `pl::render::*` is
   declared weak in `SdkCompat.hpp` and every call goes through `bitematica::mod::SdkRender`, which
-  checks the pointer. Without the render API the mod falls back to the software overlay
-  (`mWorldSpaceAvailable == false`). Two guards: `test/link_check.sh` (the linked `.so` has no
-  strong `pl::render::` reference) and `tools/verify_antegg.py` (the packaged `.so`). Both run in CI.
-  Do not include `pl/Render.hpp` without the compat header, and do not add a direct
-  `pl::render::` call that skips `SdkRender`.
+  checks the pointer. **When the render API is absent the mod draws nothing and says so on the status
+  line** — it does not fall back to a screen-space overlay. Two guards: `test/link_check.sh` (the
+  linked `.so` has no strong `pl::render::` reference) and `tools/verify_antegg.py` (the packaged
+  `.so`). Both run in CI. Do not include `pl/Render.hpp` without the compat header, and do not add a
+  direct `pl::render::` call that skips `SdkRender`.
+- **The HUD is chrome only; the schematic is never drawn through draw commands.** `UiCommand::Kind`
+  is `Rect`/`Text` only — there is no geometry primitive, so schematic geometry cannot be emitted via
+  HUD commands even by mistake. `HudOverlay::buildCommands` takes no schematic and no camera.
+  `test/hud_geometry_guard.sh` (grep guard) and `testChromeNeverDrawsSchematicGeometry`
+  (`host_tests.cpp`) enforce it; both run in CI. If you are tempted to add a Triangle kind to make a
+  2D preview, don't — that is the "software overlay" this project exists to avoid.
+- **The minimum preloader for world-space rendering is commit `167226d`** (adds `pl/Render.hpp`);
+  GlowberryClient's pin must be at or after it. See `docs/BUMP_PRELOADER.md`. The SDK's
+  `viewProjection` is **world→clip** (documented in `docs/MATRIX_SPACE.md`) — do not treat it as
+  camera-relative.
 - **`uMvp` must be the plain world->clip matrix.** The vertex shader applies the placement's yaw
   and origin itself, so `draw()` takes the world `mvp` and the placement-local frustum/camera
   separately (`render::computePlacementCull`). Passing `viewProjection * localToWorld` as `uMvp`
