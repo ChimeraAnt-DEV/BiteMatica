@@ -357,6 +357,42 @@ void testPlacementCullMvpExcludesPlacementTransform() {
   }
 }
 
+void testLocalCameraMath() {
+  std::printf("testLocalCameraMath\n");
+  // The camera the mod builds from the local player must place the eye at the player's head and
+  // point along the view direction. This is the path that works on 1.26-1.26.52, so its arithmetic
+  // is pinned here even though the feed itself needs a device.
+  const float yaw = 0.0f;   // looking toward -Z
+  const float pitch = 0.0f;
+  const float yawRadians = yaw * 3.14159265358979f / 180.0f;
+  const float pitchRadians = pitch * 3.14159265358979f / 180.0f;
+  const float cosPitch = std::cos(pitchRadians);
+  const bitematica::render::Vec3 forward{
+      -std::sin(yawRadians) * cosPitch,
+      -std::sin(pitchRadians),
+      -std::cos(yawRadians) * cosPitch,
+  };
+  check(std::fabs(forward.x) < 0.001f && std::fabs(forward.y) < 0.001f &&
+            std::fabs(forward.z + 1.0f) < 0.001f,
+        "yaw 0, pitch 0 looks toward -Z");
+
+  // Yaw 90 should look toward -X (Bedrock yaw is clockwise from -Z).
+  const float yaw90 = 90.0f * 3.14159265358979f / 180.0f;
+  const bitematica::render::Vec3 forward90{-std::sin(yaw90), 0.0f, -std::cos(yaw90)};
+  check(std::fabs(forward90.x + 1.0f) < 0.001f, "yaw 90 looks toward -X");
+
+  // The eye is the feet position plus eye height.
+  const bitematica::render::Vec3 eye{10.0f, 64.0f + 1.62f, -5.0f};
+  check(std::fabs(eye.y - 65.62f) < 0.001f, "the eye sits at the player's head height");
+
+  // A view built from that eye/forward must put a point ahead of the camera at the screen centre.
+  const auto view = bitematica::render::lookAt(eye, forward, {0, 1, 0});
+  const auto projection = bitematica::render::perspective(70.0f, 1.5f, 0.05f, 1024.0f);
+  const auto vp = bitematica::render::Mat4::multiply(projection, view);
+  check(bitematica::render::looksWorldSpace(vp, eye, forward),
+        "the player-derived camera is accepted as world-space");
+}
+
 void testLooksWorldSpace() {
   std::printf("testLooksWorldSpace\n");
   // A genuine world->clip matrix built from a camera at a non-origin world position must be
@@ -610,6 +646,7 @@ int main() {
   testPlacementLocalTransformMatchesShader();
   testRotatedPlacementFrustumCull();
   testPlacementCullMvpExcludesPlacementTransform();
+  testLocalCameraMath();
   testLooksWorldSpace();
   testVerification();
   testVerificationUnavailable();

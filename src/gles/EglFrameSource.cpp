@@ -17,9 +17,11 @@ namespace {
 using EglSwapBuffersFn = unsigned int (*)(void *display, void *surface);
 
 EglSwapBuffersFn g_originalSwapBuffers = nullptr;
-std::atomic<bool> g_installed{false};
+std::atomic<bool> g_hooked{false};
+std::atomic<bool> g_waitingForEgl{false};
 std::atomic<bool> g_live{false};
 std::atomic<unsigned long long> g_frames{0};
+std::mutex g_installMutex;
 
 std::mutex g_callbackMutex;
 FrameCallback g_callback;
@@ -50,12 +52,19 @@ unsigned int hookSwapBuffers(void *display, void *surface) {
 }
 
 void *findEglSwapBuffers() {
-  // The game has libEGL loaded; prefer that handle, fall back to a fresh open.
-  for (const char *name : {"libEGL.so", "libEGL_angle.so"}) {
+  // Every GLES game reaches one of these. ANGLE and the vendor drivers use different names, and the
+  // game may reach EGL through a wrapper, so all the common ones are tried. `RTLD_NOLOAD` is
+  // preferred so an already-mapped copy is used; a fresh open is the fallback for the case where the
+  // library is present but not yet mapped.
+  for (const char *name : {"libEGL.so", "libEGL_angle.so", "libEGL_adreno.so",
+                           "libEGL_mali.so", "libEGL_emulation.so"}) {
     void *handle = dlopen(name, RTLD_NOW | RTLD_NOLOAD);
     if (!handle) handle = dlopen(name, RTLD_NOW);
     if (handle) {
       void *symbol = dlsym(handle, "eglSwapBuffers");
+      if (symbol) return symbol;
+      // Some drivers only export the damage variant; it is called once per frame too.
+      symbol = dlsym(handle, "eglSwapBuffersWithDamageKHR");
       if (symbol) return symbol;
     }
   }
@@ -64,16 +73,23 @@ void *findEglSwapBuffers() {
 
 } // namespace
 
-bool EglFrameSource::install() {
-  if (g_installed.exchange(true, std::memory_order_relaxed)) {
-    return g_live.load(std::memory_order_relaxed);
-  }
+bool EglFrameSource::tryInstall() { return install(); }
 
+bool EglFrameSource::install() {
+  // Already live: nothing to do.
+  if (g_hooked.load(std::memory_order_acquire)) return true;
+
+  // A failed attempt is deliberately NOT latched: the mod enables before the game has necessarily
+  // mapped a GLES library, so the first attempt can legitimately fail and a later one succeed. The
+  // install path is cheap and only runs until it succeeds.
   void *target = findEglSwapBuffers();
   if (target == nullptr) {
-    preloaderLogger.warn("BiteMatica: eglSwapBuffers not found; world-space rendering unavailable");
+    g_waitingForEgl.store(true, std::memory_order_release);
     return false;
   }
+
+  std::lock_guard<std::mutex> lock(g_installMutex);
+  if (g_hooked.load(std::memory_order_acquire)) return true;
 
   if (pl::memory::hook(target, reinterpret_cast<pl::memory::FuncPtr>(&hookSwapBuffers),
                        reinterpret_cast<pl::memory::FuncPtr *>(&g_originalSwapBuffers),
@@ -82,8 +98,14 @@ bool EglFrameSource::install() {
     return false;
   }
 
+  g_hooked.store(true, std::memory_order_release);
+  g_waitingForEgl.store(false, std::memory_order_release);
   preloaderLogger.info("BiteMatica: eglSwapBuffers hooked (version-independent render seam)");
   return true;
+}
+
+bool EglFrameSource::waitingForEgl() {
+  return g_waitingForEgl.load(std::memory_order_acquire);
 }
 
 bool EglFrameSource::live() { return g_live.load(std::memory_order_acquire); }

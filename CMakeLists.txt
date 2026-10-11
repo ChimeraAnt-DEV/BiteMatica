@@ -107,6 +107,7 @@ if(ANDROID)
   add_library(bitematica SHARED
       src/mod/BiteMaticaMod.cpp
       src/mod/GameWorldSource.cpp
+      src/mod/LocalPlayerFeed.cpp
       src/gles/Gles.cpp
       src/gles/SchematicRenderer.cpp
       src/gles/EglFrameSource.cpp)
@@ -170,6 +171,7 @@ if(NOT ANDROID)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/stubs/jni.h")
     add_library(bitematica_android_syntax OBJECT
         src/mod/GameWorldSource.cpp
+        src/mod/LocalPlayerFeed.cpp
         src/gles/Gles.cpp
         src/gles/SchematicRenderer.cpp
         src/gles/EglFrameSource.cpp)
