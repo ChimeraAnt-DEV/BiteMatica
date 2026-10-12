@@ -369,8 +369,10 @@ The status line always names the mode or the failure. Find the message here.
 ## Limitations
 
 - **Verified game versions.** World-space rendering needs a preloader at or after commit `167226d`
-  (`pl/Render.hpp`). The camera comes from the local-player feed, whose offsets are shared by
-  1.26.33 / 1.26.50 / 1.26.51. A build outside that set may work but is not verified.
+  (`pl/Render.hpp`). The camera comes from `ClientInstance::getLocalPlayer`, resolved by RTTI name
+  at slot 31, and the block getter is `BlockSource::getBlock` at slot 2 — both **verified across
+  1.26.10 → 1.26.52 inclusive**, plus 1.26.60.x. Because the slots are resolved by name (no baked
+  addresses), the whole range is covered by one package. See `docs/VERSION_SUPPORT.md`.
 - **World verification needs a confirmed block getter.** The slot and calling convention are
   build-specific and are never guessed; verification ships off until you confirm them
   (`docs/FINDING_GETBLOCK.md`).
